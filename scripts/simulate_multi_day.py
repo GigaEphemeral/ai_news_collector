@@ -17,7 +17,9 @@
 生产环境里这些数据来自 run.py 每日自动写入;本脚本只演示"多日数据 → 趋势结论"
 的完整链路。运行:
 
-    /home/czq/ai_news/code/.venv/bin/python scripts/simulate_multi_day.py
+    ./.venv/bin/python scripts/simulate_multi_day.py   # 项目根下(虚拟环境在项目根)
+    # 部署环境下虚拟环境在项目根上一级 code/.venv,可写:
+    #   ../.venv/bin/python scripts/simulate_multi_day.py
 
 输出:趋势 JSON(状态 + 证据 + 窗口)打印到 stdout,并写入 data/ 下的 JSON 文件。
 """

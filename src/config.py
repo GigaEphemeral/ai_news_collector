@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""配置加载:config.yaml + /home/czq/ai_news/.env(秘密)。
+"""配置加载:config.yaml + .env(秘密,默认取项目根上两级目录的 .env)。
 
 同时把配置喂给复用模块依赖的 ConfigLoader 单例(原 rss_fetcher 通过它读取
 fetching.network_timeout / fetching.hf_daily_top_n),因此 config.yaml 保留了
@@ -7,7 +7,7 @@ fetching 段。
 
 .env 定位顺序:
   1. 环境变量 AI_NEWS_ENV_PATH
-  2. <项目根>/../../.env  (即 /home/czq/ai_news/.env)
+  2. <项目根>/../../.env  (项目根上两级目录的 .env)
   3. <项目根>/.env
 """
 import os
@@ -21,7 +21,7 @@ def find_env_path():
     env_var = os.environ.get('AI_NEWS_ENV_PATH')
     if env_var:
         return env_var
-    # 项目根上两级: /home/czq/ai_news/.env(code/ai-news-mvp → ai_news)
+    # 项目根上两级目录的 .env(项目结构 code/ai-news-mvp → code → 工作区根)
     candidates = [
         os.path.join(os.path.dirname(os.path.dirname(PROJECT_ROOT)), '.env'),
         os.path.join(PROJECT_ROOT, '.env'),

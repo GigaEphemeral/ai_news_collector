@@ -15,7 +15,9 @@
   3. 采集状态分段显示;处理顺序 筛选→去重→限量 体现在入库条目数与 pipeline 统计。
 
 运行:
-    /home/czq/ai_news/code/.venv/bin/python scripts/demo_report_aiqi7.py
+    ./.venv/bin/python scripts/demo_report_aiqi7.py   # 项目根下(虚拟环境在项目根)
+    # 部署环境下虚拟环境在项目根上一级 code/.venv,可写:
+    #   ../.venv/bin/python scripts/demo_report_aiqi7.py
 """
 import json
 import os
