@@ -132,3 +132,31 @@ keywords:
 
 limits:
   per_platform_cap: 10         # 每个平台每日候选上限(硬性约束 #8)
+
+# ---- 阶段04:日报与飞书(秘密 FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_KEYWORD 只在 .env) ----
+report:
+  required_keyword: "每日ai情报"  # 飞书自定义机器人安全关键词(发送文本必须包含;env 可覆盖)
+  max_chars: 6000                # 日报文本长度上限(超长自动裁剪,不发送失败)
+  highlights_cap: 8              # 入选 Top N(交给 Ollama 或规则挑选)
+  max_highlights: 3              # 一、今日值得关注 最多条数
+  opensource_max: 5              # 二、开源项目与工程实践 最多条数
+  solutions_max: 5               # 三、解决方案与产品发布 最多条数
+  trends_projects_max: 3         # 四、趋势观察 项目最多条数
+  trends_topics_max: 3           # 四、趋势观察 主题最多条数
+
+ollama:
+  base_url: "http://192.168.0.103:11434"  # Windows 笔记本上的 Ollama(局域网)
+  model: "Qwen3.5:9B"
+  enabled: true                  # 可选:不可达时自动降级为规则标签
+  timeout: 180                   # 单次调用超时(秒)
+  think: false                   # 关闭 thinking(该模型默认开 thinking)
+  num_predict: 2048              # 给足生成预算,避免短预算空输出
+  temperature: 0.2
+  min_output_items: 3            # 模型有效输出下限(低于则整体降级)
+  max_output_items: 5            # 模型输出条数上限
+
+feishu:
+  timeout: 30                    # 单次 POST 超时(秒)
+  max_retries: 3                 # 明确失败时的指数退避重试次数
+  backoff_seconds: 3             # 退避基数(3s,6s)
+

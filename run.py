@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AI 情报 MVP · 阶段03 单次运行入口(无调度、无飞书、无 LLM、无评分)。
+"""AI 情报 MVP · 阶段04 单次运行入口(无调度;飞书/LLM 可选)。
 
 用法:
     python run.py [--since-days N] [--date YYYY-MM-DD] [--config PATH]
                   [--db PATH] [--no-db]
+                  [--report] [--send] [--no-summarize]
 
 流程:
     读 config.yaml + .env → 分源采集(GitHub / HN / RSS / HF,
@@ -14,9 +15,14 @@
     → 写 SQLite 全表(sources / items / item_sources / project_snapshots /
        topic_daily_stats / runs / daily_reports + items_fts)
     → 趋势引擎(纯规则 24h/7d/30d,历史不足标注"窗口不足",首日只建基线)
+    → [--report] 生成日报(可选 Ollama 摘要,失败自动降级)并存入 daily_reports
+    → [--send] 发送日报(幂等:当日已 sent 则跳过;只读库,不重新抓取)
     → 输出来源统计 + 趋势结论。
 
-退出码:0=正常运行(即使部分源失败);1=全部来源失败或未产出任何条目。
+--report 与 --send 分离:飞书不可用时,后续可直接 `run.py --send --date X`
+从数据库重发已生成的日报,不重新采集。
+
+退出码:0=正常运行(即使部分源失败);1=全部来源失败/未产出条目/生成或发送失败。
 """
 import argparse
 import json
@@ -39,7 +45,7 @@ from src.trend import build_trends
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description='AIQI-4 阶段03 单次采集(无调度/飞书/LLM/评分)')
+    ap = argparse.ArgumentParser(description='AIQI-5 阶段04 单次采集+日报(可选飞书)')
     ap.add_argument('--since-days', type=int, default=None,
                     help='GitHub 采集窗口天数(默认取 config.yaml app.since_days_default)')
     ap.add_argument('--date', default=None,
@@ -47,6 +53,12 @@ def parse_args():
     ap.add_argument('--config', default=None, help='config.yaml 路径(默认项目根)')
     ap.add_argument('--db', default=None, help='SQLite 路径(默认取 config.yaml paths)')
     ap.add_argument('--no-db', action='store_true', help='跳过数据库写入(仅统计输出)')
+    ap.add_argument('--report', action='store_true',
+                    help='采集后生成日报并存入 daily_reports(不发送;失败可用 --send 重发)')
+    ap.add_argument('--send', action='store_true',
+                    help='发送 --date 对应日报(只读库,不采集;当日已成功发送则跳过)')
+    ap.add_argument('--no-summarize', action='store_true',
+                    help='跳过 Ollama 摘要,用原标题+规则标签生成"今日值得关注"')
     return ap.parse_args()
 
 
@@ -81,6 +93,31 @@ def main():
             db_path = os.path.join(data_dir, db_path)
         try:
             db = Database(db_path)
+        except Exception as e:
+            import logging
+            logging.getLogger().error(f'数据库初始化失败: {e}')
+
+    # ---------- 0) 纯发送模式:只读库,不采集(日报生成与发送分离) ----------
+    if args.send and not args.report:
+        if db is None:
+            print('[FAIL] --send 需要 SQLite(去掉 --no-db 或指定 --db)')
+            sys.exit(1)
+        try:
+            from src.feishu import send_report
+            result = send_report(db, run_date, cfg)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            ok = result['status'] in ('sent', 'skipped_already_sent')
+            print(f"\n[{'OK' if ok else 'FAIL'}] 发送结果: {result['status']}")
+            sys.exit(0 if ok else 1)
+        except Exception as e:
+            print(f'[FAIL] 发送失败: {e}')
+            sys.exit(1)
+        finally:
+            if db:
+                db.close()
+
+    if db is not None and not args.no_db:
+        try:
             run_id = db.start_run(run_date, started_at=started_at)
         except Exception as e:
             import logging
@@ -195,6 +232,7 @@ def main():
     # ---------- 5) 写 SQLite 全表 + 快照 + 主题统计 + 趋势 ----------
     db_stats = {'items_inserted': 0, 'items_updated': 0, 'sources_upserted': 0}
     trends = None
+    report_data = None
     if db is not None:
         try:
             # 1) 所有已配置来源(含 0 条目):sources 表记录 last_fetch_at / last_error
@@ -256,8 +294,25 @@ def main():
         except Exception as e:
             stats['db'] = {'error': str(e)}
             _finish_run(db, run_id, stats, forced_error=str(e))
-        finally:
-            db.close()
+        # 阶段04:日报生成(--report,可选 Ollama 摘要,失败自动降级)与发送(--send)
+        if args.report:
+            try:
+                report_data = build_and_save_report(
+                    db, run_date, cfg, stats, trends, no_summarize=args.no_summarize)
+                stats['report'] = report_data
+            except Exception as e:
+                stats['report'] = {'error': str(e)}
+                print(f'[FAIL] 日报生成失败: {e}')
+        if args.send and args.report:
+            try:
+                from src.feishu import send_report
+                send_result = send_report(db, run_date, cfg)
+                stats['report']['send'] = send_result
+                print(f"[飞书] 发送结果: {json.dumps(send_result, ensure_ascii=False)}")
+            except Exception as e:
+                stats.setdefault('report', {})['send_error'] = str(e)
+                print(f'[FAIL] 日报发送失败: {e}')
+        db.close()
 
     # ---------- 6) 输出 ----------
     out_path = os.path.join(data_dir, f"ai_news_mvp_run_{run_date.replace('-', '')}.json")
@@ -290,11 +345,50 @@ def main():
             for ev in t['evidence']:
                 print(f"    - {ev}")
 
+    # 阶段04:打印日报正文
+    if report_data:
+        print(f"\n===== 日报({run_date}) =====\n{report_data['body']}")
+
     ok_platforms = [p for p, s in stats['platforms'].items() if 'error' not in s]
     if not ok_platforms or stats['dedup']['after_dedup'] == 0:
         print("\n[FAIL] 所有来源失败或未产出条目")
         sys.exit(1)
+    if args.report and not report_data:
+        print("\n[FAIL] 日报生成失败(见上方错误)")
+        sys.exit(1)
+    if args.send and args.report:
+        sr = (report_data or {}).get('send') or {}
+        if sr.get('status') not in ('sent', 'skipped_already_sent'):
+            print(f"\n[FAIL] 日报发送失败: {sr.get('status') or 'unknown'}")
+            sys.exit(1)
     print(f"\n[OK] 完成,{len(ok_platforms)}/4 个来源成功,共 {stats['dedup']['after_dedup']} 条去重后条目")
+
+
+def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
+    """阶段04:采集结果 + 趋势 → 日报;可选 Ollama 摘要(失败自动降级);存入 daily_reports。
+
+    返回 build_report() 的 dict(含 body / validation / highlights / model_meta)。
+    """
+    from src.report import build_report, collect_candidates, rule_highlights
+    from src.summarize import summarize_or_fallback
+
+    candidates = collect_candidates(db, run_date, cfg, trends)
+    if no_summarize or not cfg.get('ollama', {}).get('enabled', True):
+        highlights = rule_highlights(candidates, cfg)
+        model_meta = {'mode': 'rule', 'degraded': False, 'status': '未启用(规则模式)'}
+    else:
+        # 只把入选 Top N 交给模型(硬性约束:模型调用必须可选且只对入选情报)
+        cap = int(cfg.get('report', {}).get('highlights_cap', 8))
+        model_input = candidates[:cap]
+        highlights, model_meta = summarize_or_fallback(model_input, cfg)
+    data = build_report(db, run_date, cfg, candidates, stats=stats, trends=trends,
+                        highlights=highlights, model_meta=model_meta)
+    saved = db.save_daily_report(run_date, data['body'])
+    data['saved_to_db'] = saved
+    issues = data.get('validation') or []
+    if issues:
+        print(f"[WARN] 日报校验未完全通过: {'; '.join(issues)}")
+    return data
 
 
 def _finish_run(db, run_id, stats, forced_error=None):
