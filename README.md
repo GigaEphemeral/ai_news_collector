@@ -1,8 +1,8 @@
-# ai-news-mvp · AI 情报采集器(阶段04:日报与飞书)
+# ai-news-mvp · AI 情报采集器(阶段05:定时执行与稳定性)
 
-轻量情报采集项目:接入 **GitHub Search API / Hacker News 官方 API / 官方博客 RSS / Hugging Face Daily Papers** 四类来源,统一字段、限量、去重,写入 **SQLite 全表 + FTS5**,提供**规则趋势引擎**(24h/7d/30d,五态,纯规则不评分不调 LLM)与**模板日报 + 可选 Ollama 摘要 + 飞书幂等发送**(生成与发送分离)。单次运行入口 `run.py`(无自建调度)。
+轻量情报采集项目:接入 **GitHub Search API / Hacker News 官方 API / 官方博客 RSS / Hugging Face Daily Papers** 四类来源,统一字段、限量、去重,写入 **SQLite 全表 + FTS5**,提供**规则趋势引擎**(24h/7d/30d,五态,纯规则不评分不调 LLM)与**模板日报 + 可选 Ollama 摘要 + 飞书幂等发送**(生成与发送分离)。单次运行入口 `run.py`(无自建调度,由平台 autopilot 每日触发)。
 
-> 阶段02:仅 sources/items 两表采集存储;阶段03 补齐全部表、项目快照、主题统计、趋势引擎;阶段04 日报模板/可选 Ollama 摘要/飞书发送(幂等、重试、防泄漏);阶段05(Hermes 定时)后续。
+> 阶段02:仅 sources/items 两表采集存储;阶段03 补齐全部表、项目快照、主题统计、趋势引擎;阶段04 日报模板/可选 Ollama 摘要/飞书发送(幂等、重试、防泄漏);阶段05 稳定性收尾(断网/单源失败/Ollama 不可达/飞书不可达均不崩溃、错误按来源进 runs、日志按日滚动)与定时触发验证(autopilot 每日跑 `python run.py`)。
 
 ## 目录结构
 
@@ -27,7 +27,7 @@ ai-news-mvp/
     summarize.py            # 可选 Ollama 摘要(精简 JSON/关 thinking/输出校验/降级) [阶段04]
     feishu.py               # 飞书发送(webhook 脱敏/幂等/退避重试/结果不确定停止) [阶段04]
     log.py / reuse.py       # 日志与复用路径挂载
-  tests/                    # pytest 单元测试(80 个:趋势/快照/FTS5/日报/Ollama/飞书)
+  tests/                    # pytest 单元测试(99 个:趋势/快照/FTS5/日报/Ollama/飞书/稳定性/日志滚动)
 ```
 
 ## 运行
@@ -167,7 +167,46 @@ cd /home/czq/ai_news/code/ai-news-mvp
 /home/czq/ai_news/code/.venv/bin/python -m pytest tests/ -v
 ```
 
-覆盖:趋势规则五态单元测试(新/升温/突增/回落/成熟)、快照连续两日对比与幂等、FTS5 查询与触发器同步、旧库迁移 rebuild、item_sources 跨源映射、runs 记录、主题统计;**阶段04**:日报关键词/长度/五栏目顺序/链接/空栏目不凑数/规则降级选择、Ollama 输入精简/输出校验(项目名匹配/URL 规范化/条数下限)/降级路径(连接错误/超时/非法输出)/think+num_predict 请求参数、飞书幂等(已 sent 跳过)/成功置 sent/退避重试后成功/重试耗尽置 failed/超时置 uncertain 不重试/缺日报与缺关键词拒绝/webhook 不出现在日志与库。从 git 仓库副本运行时需设 `AI_NEWS_BRIEF_SRC=/home/czq/ai_news/code/ai-news-brief/src`。
+覆盖:趋势规则五态单元测试(新/升温/突增/回落/成熟)、快照连续两日对比与幂等、FTS5 查询与触发器同步、旧库迁移 rebuild、item_sources 跨源映射、runs 记录、主题统计;**阶段04**:日报关键词/长度/五栏目顺序/链接/空栏目不凑数/规则降级选择、Ollama 输入精简/输出校验(项目名匹配/URL 规范化/条数下限)/降级路径(连接错误/超时/非法输出)/think+num_predict 请求参数、飞书幂等(已 sent 跳过)/成功置 sent/退避重试后成功/重试耗尽置 failed/超时置 uncertain 不重试/缺日报与缺关键词拒绝/webhook 不出现在日志与库。**阶段05**:run.py 断网全源失败不崩溃(退出 1、runs.failed、每源 last_error)、单源失败其余照常(退出 0、runs.partial)、Ollama 不可达日报规则降级、飞书不可达发送 failed 正文保留可重发、重复 --send 幂等不再调用 webhook、_platform_level 健康度判定、DailyFileHandler 按日滚动与保留期清理。从 git 仓库副本运行时需设 `AI_NEWS_BRIEF_SRC=/home/czq/ai_news/code/ai-news-brief/src`。
+
+## 阶段05:稳定性与定时执行
+
+### 触发方式(无自建调度)
+
+由平台 autopilot 每日触发单次运行:`cd /home/czq/ai_news/code/ai-news-mvp && /home/czq/ai_news/code/.venv/bin/python run.py --since-days 7`。.env 由 `src/config.py` 自动加载(`AI_NEWS_ENV_PATH` → `/home/czq/ai_news/.env` → 项目根 `.env`),无需手动 source。采集+生成日报+发送为 `run.py --since-days 7 --report --send`。
+
+- **实测采集耗时**:约 50–60s(GitHub ~10s、HN ~37s、RSS/HF ~4s,2026-10-14 实测)。定时时刻建议采集在 08:00、日报发送按「实测耗时 + 10 分钟冗余」推导(如 08:15–08:20)。
+- **时区**:autopilot 创建必须显式 `--timezone Asia/Shanghai`,否则默认 UTC(东八区下午 4 点)。
+- **幂等/不重复发送**:`daily_reports.sent_status='sent'` 的日报,重复 `--send` 直接跳过(不调用 webhook),可安全每日重复触发。
+
+### 运行日志路径
+
+- 运行统计 JSON:`/home/czq/ai_news/data/ai_news_mvp_run_YYYYMMDD.json`(来源统计/趋势结论/日报生成与发送结果,每次运行覆盖当日文件)。
+- 日志:`/home/czq/ai_news/logs/ai_news_mvp_YYYY-MM-DD.log`,按日滚动(文件名带日期,不 rename,Windows 安全),保留 90 天(`retention_days`,超期自动清理)。
+- SQLite:`/home/czq/ai_news/data/ai_news_mvp.sqlite3`;`runs` 表记录每次运行(状态/来源统计/错误/趋势),`sources.last_error` 记录按来源的最后错误,`daily_reports` 记录日报正文与发送状态。
+
+### 退出码与 runs 状态语义
+
+- 退出码 0:至少一个来源成功且有去重后条目(即使部分源失败);1:全部来源失败 / 未产出条目 / 日报生成或发送失败。
+- `runs.status`:`ok`(全部来源 ok)、`partial`(部分来源失败,如 GitHub 全挂其余正常)、`failed`(全部失败或无条目或 DB 错误)。
+- 平台健康度判定 `_platform_level`(run.py):顶层异常、GitHub 全部查询失败、HN 0 条目且有失败、RSS 全部 feed 失败、HF feed 失败且 0 条目 → `failed`;部分失败 → `partial`;其余 → `ok`。错误按来源写进 `runs.errors` 与 `sources.last_error`。
+
+### 故障恢复
+
+- **断网/全源失败**:运行不崩溃,退出 1,`runs.status=failed`,每源错误入 `runs.errors` 与 `sources.last_error`;网络恢复后直接重跑 `run.py`(快照/主题统计按主键幂等,重复无害)。
+- **单源失败**:该源错误记录,其余源照常,`runs.status=partial`,退出 0。
+- **Ollama 不可达**:日报自动降级为规则标签(标题+规则),不阻塞、不重试,`model_meta.degraded=true` 记录在输出 JSON。
+- **飞书不可达**:日报已存在 `daily_reports`(sent_status=failed),恢复后 `run.py --send --date YYYY-MM-DD` 从库重发,不重新采集;已 `sent` 不会重复发送。
+- **发送结果不确定(超时)**:置 `uncertain` 停止重发,避免重复推送;人工确认后可重新 `--send`。
+- **想要重置库**:删除 `data/ai_news_mvp.sqlite3` 后重跑即可(自动建表)。
+
+### 配置项说明(阶段05 相关)
+
+- `paths.log_dir`(默认 `../../logs` = `/home/czq/ai_news/logs`)、`paths.data_dir`、`paths.db_file`;可用 `AI_NEWS_LOG_DIR` / `AI_NEWS_DATA_DIR` / `AI_NEWS_DB_PATH` 覆盖。
+- `rss.feed_max_entries` / `feed_max_bytes`:超大 feed 早期截断(OpenAI feed ~785KB)。
+- `github.retries` / `backoff_seconds` / `request_interval_seconds`:查询级重试与限速(search 30/min)。
+- `ollama.enabled`:`false` 时强制规则模式,不再尝试调用模型。
+- `feishu.max_retries` / `backoff_seconds` / `timeout`:明确失败退避重试次数;结果不确定不重试。
 
 ## 配置项说明(全部)
 

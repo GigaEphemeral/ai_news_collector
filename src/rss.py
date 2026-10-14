@@ -176,7 +176,8 @@ def fetch_rss_and_hf(cfg):
             try:
                 res = fut.result()
                 if res.get('error'):
-                    failures[fc['name']] = f"{res['error']}: {res.get('error_detail', '')}"
+                    detail = res.get('error_detail') or ''
+                    failures[fc['name']] = f"{res['error']}" + (f": {detail}" if detail else "")
                     logging.warning(f"[RSS] {fc['name']} 失败: {res['error']}")
                     continue
                 entries = []

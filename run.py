@@ -163,6 +163,7 @@ def main():
         selected = selected[:cfg['hackernews']['per_platform_cap']]
         stats['platforms']['hackernews'] = {
             'fetched': hn_info['fetched_ids'], 'failed_items': hn_info['failed_items'],
+            'top_level_error': hn_info.get('top_level_error'),
             'passed_rules': len(selected), 'dropped': dropped,
             'cap': cfg['hackernews']['per_platform_cap'], 'time_s': round(time.time() - t0, 1),
         }
@@ -349,9 +350,12 @@ def main():
     if report_data:
         print(f"\n===== 日报({run_date}) =====\n{report_data['body']}")
 
-    ok_platforms = [p for p, s in stats['platforms'].items() if 'error' not in s]
+    ok_platforms = [p for p, s in stats['platforms'].items() if _platform_level(s) == 'ok']
+    failed_platforms = [p for p, s in stats['platforms'].items() if _platform_level(s) == 'failed']
     if not ok_platforms or stats['dedup']['after_dedup'] == 0:
         print("\n[FAIL] 所有来源失败或未产出条目")
+        if failed_platforms:
+            print(f"[FAIL] 失败来源: {', '.join(failed_platforms)}")
         sys.exit(1)
     if args.report and not report_data:
         print("\n[FAIL] 日报生成失败(见上方错误)")
@@ -361,7 +365,9 @@ def main():
         if sr.get('status') not in ('sent', 'skipped_already_sent'):
             print(f"\n[FAIL] 日报发送失败: {sr.get('status') or 'unknown'}")
             sys.exit(1)
-    print(f"\n[OK] 完成,{len(ok_platforms)}/4 个来源成功,共 {stats['dedup']['after_dedup']} 条去重后条目")
+    print(f"\n[OK] 完成,{len(ok_platforms)}/4 个来源成功"
+          f"(失败:{', '.join(failed_platforms) if failed_platforms else '无'})"
+          f",共 {stats['dedup']['after_dedup']} 条去重后条目")
 
 
 def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
@@ -391,26 +397,66 @@ def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
     return data
 
 
+def _platform_level(stat):
+    """平台级健康度:'ok' / 'partial' / 'failed'。
+
+    判定依据(阶段05:断网/单源失败时 runs 状态与退出码必须如实反映):
+      - 顶层异常(error / top_level_error)→ failed
+      - GitHub:全部查询失败 → failed;部分查询失败 → partial
+      - HN:一个条目都没抓到且有失败 → failed;有条目级失败 → partial
+      - RSS:全部 feed 失败且 0 条目 → failed;部分 feed 失败 → partial
+      - HF:feed 失败且 0 条目 → failed
+      - 其余 → ok(即使 0 条目,来源本身工作正常)
+    """
+    if not isinstance(stat, dict) or stat.get('error'):
+        return 'failed'
+    if stat.get('top_level_error'):
+        return 'failed'
+    if stat.get('queries_failed') and not stat.get('queries_ok'):
+        return 'failed'
+    if stat.get('fetched', 0) == 0 and (stat.get('failed_items')
+                                        or stat.get('feeds_failed')
+                                        or stat.get('feed_failed')):
+        return 'failed'
+    if (stat.get('queries_failed') or stat.get('failed_items')
+            or stat.get('feeds_failed') or stat.get('feed_failed')):
+        return 'partial'
+    return 'ok'
+
+
 def _finish_run(db, run_id, stats, forced_error=None):
-    """把运行状态/错误写回 runs 表。"""
+    """把运行状态/错误写回 runs 表(状态按平台级健康度判定)。"""
     if run_id is None:
         return
-    ok_platforms = [p for p, s in stats['platforms'].items() if 'error' not in s]
+    levels = {p: _platform_level(s) for p, s in stats['platforms'].items()}
     n_items = stats.get('dedup', {}).get('after_dedup', 0)
+    n_ok = len([l for l in levels.values() if l == 'ok'])
     if forced_error:
         status = 'failed'
-    elif not ok_platforms or n_items == 0:
+    elif n_ok == 0 or n_items == 0:
         status = 'failed'
-    elif len(ok_platforms) < 4:
+    elif n_ok < 4 or any(l != 'ok' for l in levels.values()):
         status = 'partial'
     else:
         status = 'ok'
     errors = {}
     for p, s in stats['platforms'].items():
-        if 'error' in s:
-            errors[p] = str(s['error'])[:500]
-        elif p == 'github' and s.get('queries_failed'):
-            errors[p] = f"{s['queries_failed']} 组查询失败" + (', 限流' if s.get('rate_limited') else '')
+        lvl = levels[p]
+        if lvl == 'failed':
+            if 'error' in s:
+                errors[p] = str(s['error'])[:500]
+            elif p == 'github' and s.get('queries_failed'):
+                errors[p] = f"{s['queries_failed']} 组查询失败" + (', 限流' if s.get('rate_limited') else '')
+            elif s.get('top_level_error'):
+                errors[p] = str(s['top_level_error'])[:500]
+        if lvl in ('partial', 'failed') and (s.get('feeds_failed') or s.get('feed_failed')):
+            if s.get('feeds_failed'):
+                names = list(s['feeds_failed'].keys())
+                errors.setdefault(p, f"{len(names)} 个 RSS feed 失败")
+                errors[p] = f"{len(names)} 个 RSS feed 失败: " + '; '.join(
+                    f"{n}:{str(e)[:60]}" for n, e in list(s['feeds_failed'].items())[:3])
+            elif s.get('feed_failed'):
+                errors[p] = f"HF Daily Papers 失败: {str(s['feed_failed'])[:200]}"
     if forced_error:
         errors['db'] = forced_error[:500]
     db.finish_run(
@@ -435,6 +481,8 @@ def _collect_source_errors(stats, cfg):
     hn = stats['platforms'].get('hackernews', {})
     if hn.get('error'):
         errs['hackernews:topstories'] = hn['error'][:500]
+    elif hn.get('top_level_error'):
+        errs['hackernews:topstories'] = str(hn['top_level_error'])[:500]
     elif hn.get('failed_items'):
         errs['hackernews:topstories'] = f"{hn['failed_items']} 条 item 抓取失败"
     for name, e in stats['platforms'].get('rss', {}).get('feeds_failed', {}).items():
