@@ -1,0 +1,11 @@
+# 秘密与运行时产物不入库
+.env
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+logs/
+scratch/

@@ -1,0 +1,11 @@
+# 阶段02 轻量依赖(已装于 /home/czq/ai_news/code/.venv)
+# 不装 torch / playwright / psycopg2 / PostgreSQL(硬性约束 #9)
+requests>=2.31
+httpx[socks]>=0.27        # [socks] 提供 socksio,兼容 ALL_PROXY=socks://127.0.0.1:7897
+feedparser>=6.0
+curl_cffi>=0.7            # TLS 指纹伪装,HF daily_papers / 部分 RSS 需要
+simhash>=2.0
+pyyaml>=6.0
+python-dotenv>=1.0
+beautifulsoup4>=4.12
+trafilatura>=1.8
