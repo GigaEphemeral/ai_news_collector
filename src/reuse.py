@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """复用原项目 ai-news-brief 的只读模块(rss_fetcher / lsh_dedup / fetch_stats / log_config)。
 
-原项目目录: /home/czq/ai_news/code/ai-news-brief(阶段01 审计确认可复用,MIT 许可)。
+原项目目录:与项目根同级的 `ai-news-brief`(即 `<项目根>/../ai-news-brief`,部署环境下为 `code/ai-news-brief`;
+阶段01 审计确认可复用,MIT 许可)。
 本模块只把它的 src/ 挂到 sys.path,不改动原项目任何文件。
 可用环境变量 AI_NEWS_BRIEF_SRC 覆盖原项目 src 路径(例如从仓库副本运行时)。
 """
@@ -34,7 +35,7 @@ def ensure_reuse_path():
     if p is None:
         raise RuntimeError(
             '未找到原项目 ai-news-brief/src(复用 rss_fetcher/lsh_dedup 需要)。'
-            '请确认 /home/czq/ai_news/code/ai-news-brief 存在,'
+            '请确认项目根同级的 ai-news-brief 目录存在(部署环境下为 code/ai-news-brief),'
             '或通过环境变量 AI_NEWS_BRIEF_SRC 指定其 src 目录。'
         )
     if p not in sys.path:

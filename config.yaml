@@ -1,5 +1,5 @@
-# AI 情报 MVP · 阶段02 采集配置
-# 非秘密配置放这里;秘密(如 GITHUB_PAT)一律只放 /home/czq/ai_news/.env
+# AI 情报 MVP · 采集配置
+# 非秘密配置放这里;秘密(如 GITHUB_PAT)一律只放 .env(默认取项目根上两级目录的 .env)
 app:
   name: ai-news-mvp
   since_days_default: 7        # run.py 默认采集窗口(--since-days 可覆盖)
@@ -7,8 +7,8 @@ app:
 # 相对项目根(code/ai-news-mvp)的路径;可用环境变量覆盖:
 #   AI_NEWS_DATA_DIR / AI_NEWS_LOG_DIR / AI_NEWS_DB_PATH / AI_NEWS_ENV_PATH
 paths:
-  data_dir: "../../data"       # 指向 /home/czq/ai_news/data(与阶段01试跑一致)
-  log_dir: "../../logs"        # 指向 /home/czq/ai_news/logs
+  data_dir: "../../data"       # 项目根上两级的 data 目录
+  log_dir: "../../logs"        # 项目根上两级的 logs 目录
   db_file: "ai_news_mvp.sqlite3"
 
 # 复用原项目 rss_fetcher 时,它通过 ConfigLoader 单例读取以下键(勿删)

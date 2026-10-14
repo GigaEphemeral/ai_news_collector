@@ -1,92 +1,241 @@
-# ai-news-mvp · AI 情报采集器(阶段05:定时执行与稳定性)
+# ai-news-mvp · AI 情报采集器
 
-轻量情报采集项目:接入 **GitHub Search API / Hacker News 官方 API / 官方博客 RSS / Hugging Face Daily Papers** 四类来源,统一字段、限量、去重,写入 **SQLite 全表 + FTS5**,提供**规则趋势引擎**(24h/7d/30d,五态,纯规则不评分不调 LLM)与**模板日报 + 可选 Ollama 摘要 + 飞书幂等发送**(生成与发送分离)。单次运行入口 `run.py`(无自建调度,由平台 autopilot 每日触发)。
+轻量 AI 情报采集项目:从 **GitHub Search API / Hacker News 官方 API / 官方博客 RSS / Hugging Face Daily Papers** 四类来源采集 AI 相关情报,经规则筛选、去重、限量后写入 **SQLite 全表 + FTS5**,提供**规则趋势引擎**(24h/7d/30d 五态,纯规则不评分不调 LLM)与**模板日报 + 可选 Ollama 摘要 + 飞书幂等发送**。单次运行入口 `run.py`,无自建调度,由平台 autopilot 每日触发。
 
-> 阶段02:仅 sources/items 两表采集存储;阶段03 补齐全部表、项目快照、主题统计、趋势引擎;阶段04 日报模板/可选 Ollama 摘要/飞书发送(幂等、重试、防泄漏);阶段05 稳定性收尾(断网/单源失败/Ollama 不可达/飞书不可达均不崩溃、错误按来源进 runs、日志按日滚动)与定时触发验证(autopilot 每日跑 `python run.py`)。阶段04修复(AIQI-7):「今日值得关注」新生代优先 + 老项目增量达阈值才上榜 + 上榜理由可解释;解决方案与产品发布每条带一行精简摘要(`report.fetch_summary` 可配置);处理顺序改为 筛选→去重→限量 并增加标题/摘要相似度去重(阈值 0.8);采集状态分段显示。
+## 快速开始
+
+以下命令假设你已位于项目根的上层目录(本项目部署时该目录名为 `code`);虚拟环境既可放在项目根(`.venv`),也可放在项目根上一级(部署环境为 `../.venv`)。
+
+```bash
+# 一次性准备(假设已位于 code/ 下)
+cd ai-news-mvp
+python3 -m venv .venv                 # 或直接复用上一级已有的虚拟环境
+./.venv/bin/pip install -r requirements.txt
+cp .env.example .env && chmod 600 .env   # 填入真实值(见"配置")
+```
+
+```bash
+# 日常运行(部署环境虚拟环境在上一级时,把 ./.venv 换成 ../.venv)
+./.venv/bin/python run.py --since-days 7          # 1) 仅采集
+./.venv/bin/python run.py --report                # 2) 采集 + 生成日报(可选 Ollama 摘要,失败自动降级)
+./.venv/bin/python run.py --send                  # 3) 从库中发送当日日报(幂等,不重新采集)
+./.venv/bin/python run.py --report --send         # 4) 采集 + 生成 + 发送一次
+./.venv/bin/python run.py --report --no-summarize # 5) 跳过 Ollama,强制规则模式
+```
+
+- `.env` 读取顺序:`AI_NEWS_ENV_PATH` 环境变量 → 项目根上两级目录的 `.env`(`../../.env`) → 项目根 `.env`。程序自动加载,无需手动 source。
+- 数据库/日志默认写入 `../../data`、`../../logs`(项目根上两级),可用 `AI_NEWS_DATA_DIR` / `AI_NEWS_LOG_DIR` / `AI_NEWS_DB_PATH` / `--db` 覆盖。
+- `--date YYYY-MM-DD` 指定运行日期(默认今天 UTC;快照/主题统计/趋势/日报都归到该日期)。
+- **生成与发送分离**:`--report` 只生成并写入 `daily_reports`;`--send` 只读库发送。飞书不可用时先 `--report` 生成,恢复后直接 `--send`,不重新抓取。
+- **幂等**:`daily_reports.sent_status='sent'` 的日报不会被重复发送,也不会被重新生成覆盖。
+- 单源失败不影响其他源;全部失败或无条目时退出码 1,否则 0。
 
 ## 目录结构
 
 ```
 ai-news-mvp/
   run.py                    # 单次运行入口:采集 + [--report] 日报 + [--send] 飞书发送
-  config.yaml               # 源/关键词/限额/超时/趋势阈值/report/ollama/feishu(非秘密)
+  config.yaml               # 全部非秘密配置(源/关键词/限额/超时/趋势阈值/report/ollama/feishu)
   .env.example              # 只列变量名,不存真值(FEISHU_WEBHOOK_URL 等秘密只在 .env)
-  requirements.txt          # 轻量依赖清单(阶段04 无新增)
+  requirements.txt          # 轻量依赖清单
   scripts/
     simulate_multi_day.py   # 多日连续运行模拟(受控合成数据,演示 8 天趋势对比)
+    demo_report_aiqi7.py    # 日报生成演示(合成数据,验证排序/摘要/分段统计)
   src/
     config.py               # config.yaml + .env 加载
     github.py               # GitHub Search API(3 组查询模板,日期动态计算)
     hackernews.py           # HN 官方 Firebase API(topstories + 规则过滤)
     rss.py                  # 复用原项目 rss_fetcher;超大 feed 早期截断
     filters.py              # 规则过滤(字段完整/时间窗口/关键词,无评分)
-    dedup.py                # URL 归一化 + 标题 SimHash + 标题/摘要相似度(阈值可配置) [AIQI-7]
-    ranking.py              # GitHub 候选排序与上榜理由(新生代优先,纯规则不评分) [AIQI-7]
+    dedup.py                # URL 归一化 + 标题 SimHash + 标题/摘要相似度(阈值可配置)
+    ranking.py              # GitHub 候选排序与上榜理由(新生代优先,纯规则不评分)
     db.py                   # SQLite 全表 + FTS5 + 快照/主题统计/运行记录/日报状态
     trend.py                # 规则趋势引擎(五态 + 24h/7d/30d + 证据)
-    report.py               # 日报模板(固定栏目/关键词/长度校验/规则降级选择/解决方案摘要) [阶段04+AIQI-7]
-    summarize.py            # 可选 Ollama 摘要 + 解决方案一行摘要(fetch_summary) [阶段04+AIQI-7]
-    feishu.py               # 飞书发送(webhook 脱敏/幂等/退避重试/结果不确定停止) [阶段04]
+    report.py               # 日报模板(固定栏目/关键词/长度校验/规则降级选择/解决方案摘要)
+    summarize.py            # 可选 Ollama 摘要 + 解决方案一行摘要(fetch_summary)
+    feishu.py               # 飞书发送(webhook 脱敏/幂等/退避重试/结果不确定停止)
     log.py / reuse.py       # 日志与复用路径挂载
-  tests/                    # pytest 单元测试(119 个:趋势/快照/FTS5/日报/Ollama/飞书/稳定性/日志滚动/排序/相似度去重)
+  tests/                    # pytest 单元测试(119 个)
 ```
 
-## 运行
+## 数据来源
 
-```bash
-cd /home/czq/ai_news/code/ai-news-mvp
-# 1) 仅采集
-/home/czq/ai_news/code/.venv/bin/python run.py --since-days 7
-# 2) 采集 + 生成日报(可选 Ollama 摘要,失败自动降级),不发送
-/home/czq/ai_news/code/.venv/bin/python run.py --report
-# 3) 从库中发送当日日报(幂等:已成功发送则跳过;不重新采集)
-/home/czq/ai_news/code/.venv/bin/python run.py --send
-# 4) 采集 + 生成 + 发送一次(手动触发验收)
-/home/czq/ai_news/code/.venv/bin/python run.py --report --send
-# 5) 跳过 Ollama,强制规则模式
-/home/czq/ai_news/code/.venv/bin/python run.py --report --no-summarize
-```
-
-- `.env` 读取顺序:`AI_NEWS_ENV_PATH` → `/home/czq/ai_news/.env` → 项目根 `.env`。
-- 秘密只放 `.env`:`FEISHU_WEBHOOK_URL`(飞书自定义机器人 webhook)、`FEISHU_WEBHOOK_KEYWORD`(安全关键词,默认「每日ai情报」)、`GITHUB_PAT`。**严禁写入代码/日志/仓库**;webhook 在任何日志/错误信息/数据库记录中都被脱敏为 `<redacted>`。
-- 数据库/日志默认写入 `../../data`、`../../logs`(即 `/home/czq/ai_news/data`、`/home/czq/ai_news/logs`),可用 `AI_NEWS_DATA_DIR` / `AI_NEWS_LOG_DIR` / `--db` 覆盖。
-- `--date YYYY-MM-DD` 指定运行日期(默认今天 UTC;Hermes 可指定报表日期;快照/主题统计/趋势/日报都归到该日期)。
-- **日报生成与发送分离**:`--report` 只生成并写入 `daily_reports`;`--send` 只读库发送。飞书不可用时先 `--report` 生成,恢复后直接 `--send`,不重新抓取。
-- **幂等**:`daily_reports.sent_status='sent'` 的日报不会被重复发送,也不会被重新生成覆盖。
-- 单源失败不影响其他源;全部失败或无条目时退出码 1,否则 0。
-
-## SQLite 全表(阶段03+04)
-
-| 表 | 作用 | 说明 |
+| 来源 | 采集方式 | 说明 |
 |---|---|---|
-| `sources` | 来源配置/启用/最后成功/错误 | 阶段02 已有 |
-| `items` | 情报条目(url UNIQUE + 内容哈希去重) | 阶段02 已有 |
-| `item_sources` | 同一事件多来源映射 | 阶段03 新增 |
-| `project_snapshots` | GitHub 项目每日快照(repo+date 主键) | **star_snapshots 思路并入此表** |
-| `topic_daily_stats` | 每天每主题条目数/来源数/代表情报 | 阶段03 新增 |
-| `runs` | 每次运行开始/结束/状态/错误/趋势 | 阶段03 新增 |
-| `daily_reports` | 日报正文/生成时间/发送状态(sent/failed/uncertain/pending)/retry_count/last_error | 阶段04 使用(阶段03 建表) |
-| `items_fts` | FTS5 external-content 全文索引 + 触发器(items_ai/ad/au) | 审计实测可用 |
+| GitHub Search API | 3 组查询模板(新项目 `topic:ai created:>{d} stars:>=20` / 新兴 Agent `topic:agents pushed:>{d} stars:>=50` / 活跃 LLM `topic:llm pushed:>{d} stars:>=100`),`{d}` 为程序动态计算的日期,每组 ≤10 条 | 只存轻量字段(快照),不抓 README/源码/评论;跨组按 `full_name` 去重 |
+| Hacker News | 官方 Firebase API:`topstories` 前 25 条 + 规则过滤(≥100 分、年龄 2h–3d) | 热度阈值与年龄窗口可配置 |
+| 官方博客 RSS | OpenAI / Hugging Face / Google DeepMind / NVIDIA Developer 四个 feed,`feedparser`(超大 feed 早期截断,如 OpenAI ~785KB 截断为前 30 条) | 源列表可配置 |
+| Hugging Face Daily Papers | HF Papers API,按(upvotes+stars)保留前 5 篇 | 数量由 `fetching.hf_daily_top_n` 决定 |
 
-- 阶段02 旧库自动迁移:连接时 `CREATE TABLE IF NOT EXISTS` 补新表,并对存量 items 执行一次 FTS `rebuild`,旧数据立即可检索。
-- FTS 查询:`MATCH 'llm OR agent'` 语法,按 bm25 排序,测试与真实运行均验证可用。
+采集走官方 API/RSS,不绕过验证码/登录/限流/封禁;不采集视频;不接入 X/Reddit/YouTube/Bilibili。
 
-## 项目快照(project_snapshots)
+## 处理流程
 
-GitHub 采集后按运行日写入:`repo, date, stars, forks, pushed_at, created_at, description, language, topics(≤5), fetched_at`,主键 `(repo, date)`。首次运行只建基线;连续运行后即可算 24h 增量、7d/30d 均值。字段裁剪与趋势参考一致(description≤200、topics≤5、不抓 README)。
+```
+各源采集 → 规则筛选(字段完整/时间窗/关键词/热度,不限量)
+        → 跨源去重(URL 归一化 + 标题 SimHash + 标题/摘要相似度)
+        → 每平台限量(per_platform_cap,默认 10)
+        → 趋势计算(24h/7d/30d 五态,纯规则)→ 日报生成(模板 + 可选 Ollama 摘要)→ 飞书发送(幂等)
+```
 
-## 主题统计(topic_daily_stats)
+- **筛选**(`src/filters.py`):字段完整、时间窗口、AI 关键词命中,不做评分。
+- **去重**(`src/dedup.py`):① URL 归一化(去跟踪参数/默认端口/www);② 标题 SimHash(汉明距离 ≤ `dedup.simhash_threshold`,默认 4);③ 标题或摘要 token 集合 Jaccard 相似度 ≥ `dedup.similarity_threshold`(默认 0.8)判为重复。
+- **限量发生在去重之后**:采集器内部不再限量,先统一跨源去重再按每平台上限截断,避免跨源重复内容各自占掉限量名额。
+- **每平台上限** `per_platform_cap: 10`:只是上限,允许不足 10 条。
+- **趋势**(`src/trend.py`):对项目(基于快照)与主题(基于日统计)输出五态,见下节。
+- **摘要**(`src/summarize.py`):可选,只对入选「今日值得关注」的 Top 8 候选调 Ollama;失败自动降级为规则标签。
+- **日报**(`src/report.py`):固定五栏目模板 + 长度/关键词校验 + 幂等发送。
 
-每日按 `date(first_seen_at)=运行日` 汇总:
-- GitHub 条目 → `extra.topics` 原样入库(无 topics 归入 `opensource`);
-- 其他平台 → 标题/摘要命中 AI 关键词;无命中归入 category/platform;
-- 计数:条目数、来源数(去重平台数)、代表情报(当日该主题互动最高条目)。
+## 配置
+
+全部非秘密配置在 `config.yaml`,秘密(`GITHUB_PAT` / `FEISHU_WEBHOOK_URL` / `FEISHU_WEBHOOK_KEYWORD`)只放 `.env`。以下为所有可配置项;除标注"环境变量覆盖"的外,均可直接改 `config.yaml` 后重启生效。
+
+### paths / app / fetching
+
+| 配置项 | 默认 | 作用 | 可配置 |
+|---|---|---|---|
+| `app.name` | `ai-news-mvp` | 应用名(日志/库名前缀) | 是 |
+| `app.since_days_default` | 7 | `run.py` 默认采集窗口(`--since-days` 可覆盖) | 是 |
+| `paths.data_dir` | `../../data` | 数据目录(项目根上两级);`AI_NEWS_DATA_DIR` 可覆盖 | 是 |
+| `paths.log_dir` | `../../logs` | 日志目录;`AI_NEWS_LOG_DIR` 可覆盖 | 是 |
+| `paths.db_file` | `ai_news_mvp.sqlite3` | SQLite 文件名;`AI_NEWS_DB_PATH` / `--db` 可覆盖 | 是 |
+| `fetching.network_timeout` | 90 | 复用 rss_fetcher 的网络超时(秒) | 是 |
+| `fetching.hf_daily_top_n` | 5 | HF Daily Papers 按(upvotes+stars)排名保留前 N 篇 | 是 |
+
+### github / hackernews / rss / hf_papers
+
+| 配置项 | 默认 | 作用 |
+|---|---|---|
+| `github.api_base` | `https://api.github.com` | GitHub API 地址 |
+| `github.per_page` | 10 | 每组查询每页上限 |
+| `github.per_platform_cap` | 10 | 每平台候选上限(去重后截断) |
+| `github.sort` / `github.order` | `stars` / `desc` | 搜索排序 |
+| `github.timeout` | 30 | 单请求超时(秒) |
+| `github.retries` | 2 | 5xx/网络错误退避重试次数(403/429 不硬闯) |
+| `github.backoff_seconds` | 2 | 退避基数(指数:2s,4s) |
+| `github.request_interval_seconds` | 1.2 | 查询间隔(search API 30/min) |
+| `github.queries` | 3 组模板 | 查询模板列表,`{d}` 为动态日期 |
+| `hackernews.api_base` | Firebase v0 | HN 官方 API 地址 |
+| `hackernews.top_n` | 25 | topstories 取前 N 条 |
+| `hackernews.min_points` | 100 | 热度阈值(score) |
+| `hackernews.min_age_hours` | 2 | 过滤过新帖子(热度未聚集) |
+| `hackernews.max_age_days` | 3 | 帖子最大年龄 |
+| `hackernews.per_platform_cap` | 10 | HN 每平台候选上限 |
+| `hackernews.timeout` | 30 | 单请求超时(秒) |
+| `hackernews.retries` | 2 | 失败退避重试次数 |
+| `hackernews.backoff_seconds` | 2 | 退避基数 |
+| `rss.max_age_days` | 7 | 普通博客条目最大年龄 |
+| `rss.per_platform_cap` | 10 | RSS 平台(全部博客合并)候选上限 |
+| `rss.feed_max_entries` | 30 | 超大 feed 早期截断:最多保留前 N 条 |
+| `rss.feed_max_bytes` | 262144 | 超过该字节数触发截断(OpenAI feed ~785KB) |
+| `rss.timeout` | 60 | 单请求超时(秒) |
+| `rss.retries` | 2 | 失败退避重试次数 |
+| `rss.backoff_seconds` | 2 | 退避基数 |
+| `rss.sources` | 4 个官方博客 | feed 列表(name/url/category),可增删 |
+| `hf_papers.url` | HF API 地址 | HF 数据源地址 |
+| `hf_papers.name` | `HF Daily Papers` | 数据源名称 |
+| `hf_papers.per_platform_cap` | 10 | HF 候选上限 |
+| `hf_papers.max_age_days` | 14 | HF 按周批,放宽年龄窗口 |
+
+### dedup / limits / keywords / topics
+
+| 配置项 | 默认 | 作用 |
+|---|---|---|
+| `dedup.simhash_threshold` | 4 | 标题 SimHash 汉明距离阈值(越小越严格) |
+| `dedup.similarity_threshold` | 0.8 | 标题/摘要 Jaccard 相似度 ≥ 该值判重(设为 ≤0 关闭) |
+| `limits.per_platform_cap` | 10 | 每平台每日候选上限(硬性约束) |
+| `keywords.ai` | 24 个词 | 规则初筛关键词(仅 HN/RSS/HF 标题+摘要命中判断,不做评分) |
+| `topics.max_per_item` | 3 | 每条目最多取 N 个主题(GitHub 取 extra.topics 前 N) |
+
+### trend(规则趋势引擎阈值)
+
+| 配置项 | 默认 | 作用 |
+|---|---|---|
+| `trend.windows.24h` | 2 | 24h 窗口所需最小历史天数(不足标"窗口不足") |
+| `trend.windows.7d` | 7 | 7d 窗口所需最小历史天数 |
+| `trend.windows.30d` | 30 | 30d 窗口所需最小历史天数 |
+| `trend.project.young_days` | 30 | 创建 ≤ 30 天 → 新项目(新鲜度证据) |
+| `trend.project.sudden_growth_ratio` | 3.0 | 24h 增量 ≥ 前 7d 日均 × 3 → 突然增长 |
+| `trend.project.warming_min_days` | 3 | 连续 N 天正增长且趋势不减 → 持续升温 |
+| `trend.project.warming_min_growth_pct` | 0.5 | 累计增长率 < 该值(%)→ 幅度不足标"尚待观察" |
+| `trend.project.maturity_stars` | 50000 | Star 总数 ≥ 该值 → 成熟期候选 |
+| `trend.project.maturity_growth_pct` | 0.05 | 近 7 天日均增长率 ≤ 该值(%)→ 稳定/成熟 |
+| `trend.project.decline_negative_days` | 2 | 连续 N 天负增长 → 热度回落 |
+| `trend.project.stagnation_days` | 7 | 连续 N 日入选且近 N 日增量≈0 → 降权 |
+| `trend.project.stagnation_max_delta_pct` | 0.05 | 近 N 天总增量 ≤ 该比例(%)视为无新变化 |
+| `trend.topic.sudden_growth_ratio` | 2.0 | 当日条目数 ≥ 前 N 日均值 × 2 → 突然增长 |
+| `trend.topic.warming_min_days` | 3 | 连续 N 天增量且 ≥1 天多来源 → 持续升温 |
+| `trend.topic.maturity_min_count` | 3 | 近 7 天日均条目数 ≥ 该值 → 成熟期候选 |
+| `trend.topic.decline_negative_days` | 2 | 连续 N 天条目数递减 → 热度回落 |
+
+### report(日报)
+
+| 配置项 | 默认 | 作用 |
+|---|---|---|
+| `report.required_keyword` | `每日ai情报` | 飞书安全关键词(发送文本必须包含;`FEISHU_WEBHOOK_KEYWORD` 可覆盖) |
+| `report.max_chars` | 6000 | 日报文本长度上限(超长自动裁剪) |
+| `report.highlights_cap` | 8 | 入选 Top N(交给 Ollama 或规则挑选) |
+| `report.max_highlights` | 3 | 「今日值得关注」最多条数 |
+| `report.opensource_max` | 5 | 「开源项目与工程实践」最多条数 |
+| `report.solutions_max` | 5 | 「解决方案与产品发布」最多条数 |
+| `report.trends_projects_max` | 3 | 「趋势观察」项目最多条数 |
+| `report.trends_topics_max` | 3 | 「趋势观察」主题最多条数 |
+| `report.sort_by` | `freshness` | 排序策略:`freshness`(新生代优先,兼顾老项目增量)/ `growth`(24h 增量优先)/ `stars`(star 总数) |
+| `report.new_days` | 30 | 创建 ≤ 该天数 → 新生代(与 `trend.project.young_days` 一致) |
+| `report.old_repo_min_delta_24h` | 50 | 老项目上榜「今日值得关注」的最低 24h Star 增量 |
+| `report.old_repo_min_growth_pct` | 0.5 | 或 24h 增长率 ≥ 该值(%)(满足其一即可) |
+| `report.recent_push_days` | 7 | 快照不足(首日)时,新生代须近期 push 窗口(天) |
+| `report.fetch_summary` | false | `true` 时对入选「解决方案与产品发布」抓正文首段/调 Ollama 生成一行摘要;`false` 只显示库中已有 summary,为空注明理由 |
+| `report.summary_max_chars` | 80 | 「解决方案与产品发布」一行摘要最大长度 |
+
+### ollama / feishu
+
+| 配置项 | 默认 | 作用 |
+|---|---|---|
+| `ollama.base_url` | `http://192.168.0.103:11434` | Ollama 服务地址(局域网) |
+| `ollama.model` | `Qwen3.5:9B` | 摘要模型 |
+| `ollama.enabled` | true | `false` 时强制规则模式,不再尝试调用模型 |
+| `ollama.timeout` | 180 | 单次调用超时(秒) |
+| `ollama.think` | false | 关闭 thinking |
+| `ollama.num_predict` | 2048 | 生成预算上限 |
+| `ollama.temperature` | 0.2 | 采样温度 |
+| `ollama.min_output_items` | 3 | 模型有效输出下限(低于则整体降级) |
+| `ollama.max_output_items` | 5 | 模型输出条数上限 |
+| `feishu.timeout` | 30 | 单次 POST 超时(秒) |
+| `feishu.max_retries` | 3 | 明确失败时的指数退避重试次数 |
+| `feishu.backoff_seconds` | 3 | 退避基数(3s,6s) |
+
+**排序只做规则分层**(新生代层/老项目增量层/其余),不生成综合评分或隐藏分值,不把不同平台热度合并。
+
+## 依赖与约束
+
+- **复用来源**:按审计报告复用原项目 [`frankzch/ai-news-brief`](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`,只读不改动):`rss_fetcher`(HF daily papers / parse_feed)、`lsh_dedup`、`log_config`(可选 `content_processor` / `fetch_stats`)。原项目 src 默认取项目根同级的 `ai-news-brief/src`,可用环境变量 `AI_NEWS_BRIEF_SRC` 覆盖(例如从 git 仓库副本运行时)。
+- **Python 版本**:开发环境实测 3.14.4;无锁死版本,`requirements.txt` 为下限约束。
+- **依赖清单**(全部轻量,无重依赖):`requests`、`httpx[socks]`、`feedparser`、`curl_cffi`、`simhash`、`pyyaml`、`python-dotenv`、`beautifulsoup4`、`trafilatura`。
+- **约束**:不安装 torch / playwright / psycopg2 / PostgreSQL;不引入 Redis/Kafka/向量库/复杂多智能体架构;模型调用可选(默认规则优先)。
+
+## 数据库与表结构
+
+SQLite 全表 + FTS5 全文索引(连接时 `CREATE TABLE IF NOT EXISTS` 自动补表,旧库自动迁移并对存量 items 执行一次 FTS rebuild)。
+
+| 表 | 作用 |
+|---|---|
+| `sources` | 来源配置/启用/最后成功/错误(`last_error`) |
+| `items` | 情报条目(url UNIQUE + 内容哈希去重) |
+| `item_sources` | 同一事件多来源映射 |
+| `project_snapshots` | GitHub 项目每日快照(`repo, date` 主键:stars/forks/pushed_at/created_at/description/language/topics≤5/fetched_at) |
+| `topic_daily_stats` | 每天每主题条目数/来源数/代表情报 |
+| `runs` | 每次运行开始/结束/状态(ok/partial/failed)/错误/趋势 |
+| `daily_reports` | 日报正文/生成时间/发送状态(sent/failed/uncertain/pending)/retry_count/last_error |
+| `items_fts` | FTS5 external-content 全文索引 + 触发器(items_ai/ad/au) |
+
+FTS 查询:`MATCH 'llm OR agent'` 语法,按 bm25 排序。
 
 ## 趋势引擎(src/trend.py,纯规则、不评分、不调 LLM)
 
-对**项目**(基于快照)与**主题**(基于日统计)各输出五态:
+对**项目**(基于 `project_snapshots`)与**主题**(基于 `topic_daily_stats`)各输出五态:
 
-| 状态 | 项目规则(project_snapshots) | 主题规则(topic_daily_stats) |
+| 状态 | 项目规则 | 主题规则 |
 |---|---|---|
 | 新出现 | 仅 1 个快照日 / 昨日断档 / 变化不足以定论 | 仅 1 天统计 / 昨日断档 |
 | 持续升温 | 连续 ≥3 天正增长、趋势不减、窗口累计增长率 ≥ 0.5% | 连续 ≥3 天增量且 ≥1 天多来源 |
@@ -94,25 +243,17 @@ GitHub 采集后按运行日写入:`repo, date, stars, forks, pushed_at, created
 | 进入成熟期 | Star ≥ 5 万且 7 日均增长 ≤ 0.05%;或连续 ≥7 日入选且近 7 日增量≈0 | 7 天日均 ≥ 3 条且近 3 天持平 |
 | 热度回落 | 连续 ≥2 天负增长;或近期均值低于前期且当日无正增长 | 连续 ≥2 天递减;或近期低于前期 |
 
-- **三个时间尺度**:24h(需连续昨日+今日)、7d(需 7 个观察日)、30d(需 30 个观察日);不足的窗口明确输出 `窗口不足(仅 N 天,需 M 天)`,不臆造。
-- **首次运行只建基线**:库中无更早日快照时全部标 `初步判断` + `系统首日运行` 说明,次日才开始计算 24h 增量。
+- **三个时间尺度**:24h(需昨日+今日两个连续快照日)、7d(需 7 个观察日)、30d(需 30 个观察日);不足的窗口明确输出 `窗口不足(仅 N 天,需 M 天)`,不臆造。
+- **首次运行只建基线**:库中无更早日快照时全部标 `初步判断` + `系统首日运行` 说明。
 - **证据强制**:每个结论带来源(表名)、数字、时间窗;证据不足写"新出现,尚待观察",禁止编造。
-- **重复降权**:连续 ≥7 日入选且近 7 日 Star 增量≈0(正负均 ≤0.05%)标 `downgraded: true` 并附原因;真实涨跌不算降权。
-- 阈值全部在 `config.yaml` 的 `trend:` 段,可调。输出顺序为固定状态分组(展示用,非评分排序)。
+- **重复降权**:连续 ≥7 日入选且近 7 日 Star 增量≈0(±≤0.05%)标 `downgraded: true`;真实涨跌不算降权。
+- 阈值全部在 `config.yaml` 的 `trend:` 段;输出顺序为固定状态分组(展示用,非评分排序)。
 
-## 多日连续运行演示(验收:连续运行可对比昨日/近 7 天)
-
-```bash
-/home/czq/ai_news/code/.venv/bin/python scripts/simulate_multi_day.py
-```
-
-用受控合成数据模拟连续 8 天运行(临时库),演示五态全覆盖、昨日/7 天对比、"窗口不足"标注与降权。真实运行请每日执行 `run.py`(Hermes 触发,阶段05),快照与统计逐日累积。
-
-## 日报与飞书(阶段04)
+## 日报与飞书
 
 ### 日报模板(src/report.py)
 
-固定栏目(方案第七节),栏目允许为空、不凑数,每条附原文链接,推测与事实分开:
+固定五栏目(栏目允许为空、不凑数,每条附原文链接,推测与事实分开):
 
 ```
 每日ai情报 · AI 情报日报 2026-10-14        ← 标题含安全关键词(webhook 校验必需)
@@ -126,30 +267,15 @@ GitHub 采集后按运行日写入:`repo, date, stars, forks, pushed_at, created
 五、采集状态       (成功来源数/发现→筛选→去重→限量 分段/模型状态/失败源)
 ```
 
-- 长度与关键词校验:`validate_report()` 检查「每日ai情报」关键词与 `report.max_chars`(6000),超长自动裁剪(关键词在标题首行不受影响)。
-- 生成与发送分离:`build_report()` 只写 `daily_reports`;`run.py --send` 从库重发,不重新抓取。
-
-### 「今日值得关注」排序与上榜理由(阶段04修复 AIQI-7,成员修正版)
-
-成员反馈:首条日报该栏目选了 ECC(创建 269 天)、firecrawl(912 天)、ollama(1206 天)、AutoGPT(1308 天)等老项目,时效性差;上榜理由也是模型编造的模糊话术。修复(纯规则、不评分、不调 LLM,阈值全部在 `config.yaml` 的 `report:` 段):
-
-- **排序策略 `report.sort_by`**:`freshness`(默认,新生代优先)| `growth`(24h 增量优先)| `stars`(star 总数,旧行为)。
-- **新生代优先,兼顾老项目增量**:创建 ≤ `report.new_days`(30)天的项目排最前;老项目只要 24h Star 增量 ≥ `report.old_repo_min_delta_24h`(50)或 24h 增长率 ≥ `report.old_repo_min_growth_pct`(0.5%)也允许上榜,不一刀切排除(成员明确:老项目有价值,但更要关注异军突起的新生代)。
-- **首日/快照不足降级**:快照不足 2 天无法算 24h 增量时,仅新生代且近期 push(≤ `report.recent_push_days`,7 天)入选,并标注「初步判断」;宁可少选,不把无增量的老项目顶上来凑数(栏目允许为空)。
-- **上榜理由可解释**:每条给出具体理由(「今日新出现」「新生代(创建 N 天)」「24h Star +N(前一日 M)」「近 7 天持续更新」「老项目增量达阈值上榜」「初步判断(历史不足)」),全部基于库中真实字段;Ollama 摘要路径的上榜理由同样由代码覆盖为库中事实,不用模型编造的模糊话术。
-
-### 解决方案与产品发布 一行精简摘要(阶段04修复 AIQI-7,成员修正版)
-
-成员反馈:该栏目多条 summary 为空,一眼看不出内容。修复:
-
-- 每条带一行精简摘要(≤ `report.summary_max_chars`,80 字),让人不看链接就懂内容;
-- **摘要来源优先级**:库中已有 summary → 为空且 `report.fetch_summary: true` 时抓正文首段(复用原项目 `content_processor`)或调 Ollama 生成一句话摘要(只对入选 ≤ `solutions_max` 条,单次尝试不反复重试烧 token)→ 仍为空则注明理由(如「原文未提供摘要」),不显示空白;
-- **`report.fetch_summary` 默认 `false`**(成员自己用不开启,不额外烧 token):只显示库中已有 summary,为空就注明理由;开源给他人使用时可设为 `true` 自动抓取/生成。
+- **「今日值得关注」排序**(纯规则、不评分):新生代(创建 ≤ `report.new_days` 天)优先;老项目仅当 24h Star 增量 ≥ `report.old_repo_min_delta_24h` 或 24h 增长率 ≥ `report.old_repo_min_growth_pct` 才允许上榜;快照不足 2 天(首日)时仅新生代且近期 push(≤ `report.recent_push_days`)入选并标注「初步判断」;上榜理由基于库中真实字段(「今日新出现」「新生代(创建 N 天)」「24h Star +N(前一日 M)」等),Ollama 摘要路径同样由代码覆盖为库中事实。
+- **「解决方案与产品发布」一行摘要**:每条带一行精简摘要(≤ `report.summary_max_chars` 字);来源优先级:库中已有 summary → 为空且 `report.fetch_summary: true` 时抓正文首段或调 Ollama 生成一句话摘要 → 仍为空注明理由(如「原文未提供摘要」);`fetch_summary` 默认 `false`(不额外烧 token)。
+- **长度与关键词校验**:`validate_report()` 检查「每日ai情报」关键词与 `report.max_chars`(6000),超长自动裁剪。
+- **生成与发送分离**:`build_report()` 只写 `daily_reports`;`run.py --send` 从库重发,不重新抓取。
 
 ### 可选 Ollama 摘要(src/summarize.py)
 
-- 只对入选 Top `highlights_cap`(8)调用 `http://192.168.0.103:11434` 的 `Qwen3.5:9B`;
-- 输入精简 JSON:`name/description/stars/stars_24h/created_days/topics`(github-trend-reference 第五节),不传 API 原始 JSON;
+- 只对入选 Top `report.highlights_cap`(8)调用 `ollama.base_url` 的 `ollama.model`(Qwen3.5:9B);
+- 输入精简 JSON:`name/description/stars/stars_24h/created_days/topics`(description ≤120 字符、topics ≤5),不传 API 原始 JSON;
 - **关闭 thinking(`think: false`)并给足生成预算(`num_predict: 2048`)**,`format: json` 强制 JSON 输出;
 - 输出 3-5 条,经代码校验:项目名必须与输入匹配、URL 取输入规范化值(防编造链接)、简介/依据非空;
 - 超时/不可达/输出非法 → **降级**:原标题 + 规则标签,不阻塞日报、不反复重试(单次调用)。
@@ -161,116 +287,127 @@ GitHub 采集后按运行日写入:`repo, date, stars, forks, pushed_at, created
 - 明确失败(HTTP 返回非 0)→ 指数退避重试,有限次(`feishu.max_retries: 3`);结果不确定(超时/响应无法解析)→ 置 `uncertain` 立即停止,不无限重发;
 - 发送文本必须含安全关键词,缺失拒绝发送。
 
-## 复用说明
-
-按审计报告复用原项目 [`frankzch/ai-news-brief`](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`,只读不改动):`rss_fetcher`(HF daily papers / parse_feed)、`lsh_dedup`、`log_config`。原项目 src 定位:默认 `/home/czq/ai_news/code/ai-news-brief/src`,可用 `AI_NEWS_BRIEF_SRC` 覆盖。
-
-## 依赖
-
-阶段03 **无新增依赖**。仅轻量:requests, httpx[socks], feedparser, curl_cffi, simhash, pyyaml, python-dotenv, beautifulsoup4, trafilatura。**不装** torch / playwright / psycopg2 / PostgreSQL / 向量库。
-
-## GitHub 采集查询(3 组,日期动态计算,每组 ≤10)
-
-| 组 | 模板 |
-|---|---|
-| 新项目 | `topic:ai created:>{d} stars:>=20` |
-| 新兴 Agent | `topic:agents pushed:>{d} stars:>=50` |
-| 活跃 LLM 项目 | `topic:llm pushed:>{d} stars:>=100` |
-
-只保存轻量字段(见"项目快照"),不抓 README/源码/评论。跨组按 `full_name` 去重。
-
-## 排序与筛选规则(阶段04修复 AIQI-7)
-
-### 处理顺序(成员修正版:规则筛选 → 去重 → 限量)
-
-```
-各源采集 → 规则筛选(字段完整/时间窗/关键词/热度,不限量)
-        → 跨源去重(URL 归一化 + 标题 SimHash + 标题/摘要相似度)
-        → 每平台限量(per_platform_cap,默认 10)
-```
-
-- **限量发生在去重之后**:采集器内部不再限量(GitHub 跨组 full_name 去重后全量进入跨源去重),先统一去重再按每平台上限截断,避免跨源重复内容各自占掉限量名额、挤掉独特条目。
-- **去重机制**:① URL 归一化(去跟踪参数/默认端口/www);② 标题 SimHash(汉明距离阈值 `dedup.simhash_threshold: 4`);③ **标题或摘要 token 集合 Jaccard 相似度 ≥ `dedup.similarity_threshold`(默认 0.8,八成)判为重复**(新增;成员明确规则并已注明在 README)。
-- **统计口径如实分段显示**:日报「五、采集状态」与运行输出都显示 发现 → 筛选 → 去重 → 限量 各步数字,不再用「去重后」掩盖中间步骤。
-
-### 每平台上限
-
-GitHub / HN / RSS(全部博客合并)/ HF 各自 `per_platform_cap: 10`,只是上限,允许不足 10 条(硬性约束 #8)。
-
-### 排序策略(可配置,`config.yaml` 的 `report:` 段)
-
-| 配置项 | 默认 | 说明 |
-|---|---|---|
-| `report.sort_by` | `freshness` | `freshness`(新生代优先,兼顾老项目增量)/ `growth`(24h 增量优先)/ `stars`(star 总数,旧行为) |
-| `report.new_days` | 30 | 创建 ≤ 该天数 → 新生代(与 `trend.project.young_days` 一致) |
-| `report.old_repo_min_delta_24h` | 50 | 老项目上榜「今日值得关注」的最低 24h Star 增量 |
-| `report.old_repo_min_growth_pct` | 0.5 | 或 24h 增长率 ≥ 该值(%)(满足其一即可) |
-| `report.recent_push_days` | 7 | 快照不足(首日)时,新生代须近期 push 窗口(天) |
-| `report.fetch_summary` | false | `true` 时对入选「解决方案与产品发布」抓正文首段/调 Ollama 生成一行摘要;`false`(默认)只显示库中已有 summary,为空注明理由 |
-| `report.summary_max_chars` | 80 | 解决方案一行摘要最大长度 |
-| `dedup.similarity_threshold` | 0.8 | 标题/摘要相似度阈值(设为 ≤0 关闭) |
-
-排序只做规则分层(新生代层/老项目增量层/其余),不生成综合评分或隐藏分值,不把不同平台热度合并(硬性约束 #6)。
-
 ## 测试
 
 ```bash
-cd /home/czq/ai_news/code/ai-news-mvp
-/home/czq/ai_news/code/.venv/bin/python -m pytest tests/ -v
+./.venv/bin/python -m pytest tests/ -q   # 全量测试,当前 119 个
 ```
 
-覆盖:趋势规则五态单元测试(新/升温/突增/回落/成熟)、快照连续两日对比与幂等、FTS5 查询与触发器同步、旧库迁移 rebuild、item_sources 跨源映射、runs 记录、主题统计;**阶段04**:日报关键词/长度/五栏目顺序/链接/空栏目不凑数/规则降级选择、Ollama 输入精简/输出校验(项目名匹配/URL 规范化/条数下限)/降级路径(连接错误/超时/非法输出)/think+num_predict 请求参数、飞书幂等(已 sent 跳过)/成功置 sent/退避重试后成功/重试耗尽置 failed/超时置 uncertain 不重试/缺日报与缺关键词拒绝/webhook 不出现在日志与库。**阶段05**:run.py 断网全源失败不崩溃(退出 1、runs.failed、每源 last_error)、单源失败其余照常(退出 0、runs.partial)、Ollama 不可达日报规则降级、飞书不可达发送 failed 正文保留可重发、重复 --send 幂等不再调用 webhook、_platform_level 健康度判定、DailyFileHandler 按日滚动与保留期清理。**阶段04修复(AIQI-7)**:新生代优先排序/老项目增量阈值/首日降级不凑数/上榜理由可解释(ranking)、标题与摘要相似度 ≥0.8 判重(dedup)、处理顺序 筛选→去重→限量(采集器不限量、限量后入库条数)、跨源相似度去重、解决方案摘要 fetch_summary 生效与空摘要注明理由、采集状态分段显示。从 git 仓库副本运行时需设 `AI_NEWS_BRIEF_SRC=/home/czq/ai_news/code/ai-news-brief/src`。
+覆盖:趋势五态、快照连续两日对比与幂等、FTS5 查询与触发器同步、旧库迁移 rebuild、item_sources 跨源映射、runs 记录、主题统计、日报关键词/长度/栏目顺序/链接/空栏目不凑数/规则降级选择、Ollama 输入精简/输出校验/降级路径/think+num_predict 请求参数、飞书幂等/退避重试/结果不确定/缺日报与缺关键词拒绝/webhook 脱敏、run.py 断网与单源失败不崩溃、日志按日滚动与保留期清理、排序与相似度去重。
 
-## 阶段05:稳定性与定时执行
+多日连续运行演示(合成数据,8 天趋势):`./.venv/bin/python scripts/simulate_multi_day.py`。
 
-### 触发方式(无自建调度)
+## 定时与自动化
 
-由平台 autopilot 每日触发单次运行:`cd /home/czq/ai_news/code/ai-news-mvp && /home/czq/ai_news/code/.venv/bin/python run.py --since-days 7`。.env 由 `src/config.py` 自动加载(`AI_NEWS_ENV_PATH` → `/home/czq/ai_news/.env` → 项目根 `.env`),无需手动 source。采集+生成日报+发送为 `run.py --since-days 7 --report --send`。
+本项目**无自建调度**,每日触发方式二选一(或并用):
 
-- **实测采集耗时**:约 50–60s(GitHub ~10s、HN ~37s、RSS/HF ~4s,2026-10-14 实测)。定时时刻建议采集在 08:00、日报发送按「实测耗时 + 10 分钟冗余」推导(如 08:15–08:20)。
-- **时区**:autopilot 创建必须显式 `--timezone Asia/Shanghai`,否则默认 UTC(东八区下午 4 点)。
-- **幂等/不重复发送**:`daily_reports.sent_status='sent'` 的日报,重复 `--send` 直接跳过(不调用 webhook),可安全每日重复触发。
+### 平台 autopilot(推荐)
 
-### 运行日志路径
+```bash
+# 1) 建 autopilot(采集环节)
+multica autopilot create \
+  --title "每日AI情报-采集" \
+  --description "<采集任务提示词>" \
+  --agent <agent名或ID> \
+  --mode create_issue \
+  --issue-title-template "每日AI情报 采集 {{date}}" \
+  --project <project-id>          # 可选,归属项目
 
-- 运行统计 JSON:`/home/czq/ai_news/data/ai_news_mvp_run_YYYYMMDD.json`(来源统计/趋势结论/日报生成与发送结果,每次运行覆盖当日文件)。
-- 日志:`/home/czq/ai_news/logs/ai_news_mvp_YYYY-MM-DD.log`,按日滚动(文件名带日期,不 rename,Windows 安全),保留 90 天(`retention_days`,超期自动清理)。
-- SQLite:`/home/czq/ai_news/data/ai_news_mvp.sqlite3`;`runs` 表记录每次运行(状态/来源统计/错误/趋势),`sources.last_error` 记录按来源的最后错误,`daily_reports` 记录日报正文与发送状态。
+# 2) 加定时触发 —— 必须显式 --timezone,否则默认 UTC(会偏 8 小时)
+multica autopilot trigger-add <autopilot-id> \
+  --kind schedule --cron "30 21 * * *" --timezone Asia/Shanghai --label "每日 21:30 采集"
 
-### 退出码与 runs 状态语义
+# 3) 查看/验证(trigger 的 next_run_at 应为东八区目标时刻)
+multica autopilot list
+multica autopilot get <autopilot-id>
+multica autopilot trigger-list <autopilot-id>
+multica autopilot runs <autopilot-id>       # 执行历史
+
+# 4) 改时间:trigger-delete 旧触发 + trigger-add 新触发(update 只能改 agent/描述/状态)
+multica autopilot trigger-delete <autopilot-id> <trigger-id>
+multica autopilot trigger-add <autopilot-id> --kind schedule --cron "0 8 * * *" --timezone Asia/Shanghai
+```
+
+autopilot 每日触发的实际命令为 `run.py --since-days 7`(采集)与 `run.py --report --send`(日报发送);`.env` 由 `src/config.py` 自动加载,无需手动 source。程序幂等,重复跑安全。
+
+本项目已配置两个 autopilot(2026-10-14 创建,配置正确,次日生效,无需重复创建):
+
+| 名称 | 调度(cron,Asia/Shanghai) | 作用 |
+|---|---|---|
+| 每日AI情报-采集 | `30 21 * * *`(每天 21:30) | 采集四源 → 写 SQLite/JSON → 汇报统计 |
+| 每日AI情报-日报发送 | `45 21 * * *`(每天 21:45) | 幂等生成+发送飞书日报 |
+
+顺序合理(先采后发);验证生效看它们的 `runs` 历史与 issue 即可。
+
+### 本地 cron 替代
+
+```bash
+crontab -e
+# 每天 08:00 采集+生成+发送全链路
+0 8 * * * cd <项目根> && <项目根>/.venv/bin/python run.py --since-days 7 --report --send >> <项目根上两级>/logs/cron.log 2>&1
+# 或拆分两步:21:30 只采集,21:45 生成并发送(与平台 autopilot 相同的节奏)
+30 21 * * * cd <项目根> && <项目根>/.venv/bin/python run.py --since-days 7 >> <项目根上两级>/logs/cron.log 2>&1
+45 21 * * * cd <项目根> && <项目根>/.venv/bin/python run.py --report --send --date $(date +\%Y-\%m-\%d) >> <项目根上两级>/logs/cron.log 2>&1
+```
+
+(把 `<项目根>` 换成实际路径;示例中的 `.venv` 在项目根内,部署环境下它在项目根上一级,相应写 `<项目根>/.venv` 为 `<项目根>/../.venv`。日志文件按日滚动,保留 90 天。)
+
+### 时区与时刻建议
+
+- **时区警告**:autopilot 创建必须显式 `--timezone Asia/Shanghai`,否则默认 UTC(东八区下午 4 点)。
+- **实测采集耗时**:约 60–70s(2026-10-14 实测单次 68s,见「开发与运行统计」);定时时刻建议采集在 08:00,日报发送按「实测耗时 + 10 分钟冗余」推导。
+
+### 运行产物路径(相对项目根)
+
+- 运行统计 JSON:`../../data/ai_news_mvp_run_YYYYMMDD.json`(来源统计/趋势结论/日报生成与发送结果,每次运行覆盖当日文件)。
+- 日志:`../../logs/ai_news_mvp_YYYY-MM-DD.log`,按日滚动(文件名带日期,不 rename,Windows 安全),保留 90 天(`retention_days`,超期自动清理)。
+- SQLite:`../../data/ai_news_mvp.sqlite3`;`runs` 表记录每次运行,`sources.last_error` 记录按来源的最后错误,`daily_reports` 记录日报正文与发送状态。
+
+### 退出码与 runs 状态
 
 - 退出码 0:至少一个来源成功且有去重后条目(即使部分源失败);1:全部来源失败 / 未产出条目 / 日报生成或发送失败。
-- `runs.status`:`ok`(全部来源 ok)、`partial`(部分来源失败,如 GitHub 全挂其余正常)、`failed`(全部失败或无条目或 DB 错误)。
-- 平台健康度判定 `_platform_level`(run.py):顶层异常、GitHub 全部查询失败、HN 0 条目且有失败、RSS 全部 feed 失败、HF feed 失败且 0 条目 → `failed`;部分失败 → `partial`;其余 → `ok`。错误按来源写进 `runs.errors` 与 `sources.last_error`。
+- `runs.status`:`ok`(全部来源 ok)、`partial`(部分来源失败)、`failed`(全部失败或无条目或 DB 错误)。
+- 健康度判定 `_platform_level`(run.py):顶层异常、GitHub 全部查询失败、HN 0 条目且有失败、RSS 全部 feed 失败、HF feed 失败且 0 条目 → `failed`;部分失败 → `partial`;其余 → `ok`。错误按来源写进 `runs.errors` 与 `sources.last_error`。
 
-### 故障恢复
+## 故障恢复
 
 - **断网/全源失败**:运行不崩溃,退出 1,`runs.status=failed`,每源错误入 `runs.errors` 与 `sources.last_error`;网络恢复后直接重跑 `run.py`(快照/主题统计按主键幂等,重复无害)。
 - **单源失败**:该源错误记录,其余源照常,`runs.status=partial`,退出 0。
 - **Ollama 不可达**:日报自动降级为规则标签(标题+规则),不阻塞、不重试,`model_meta.degraded=true` 记录在输出 JSON。
 - **飞书不可达**:日报已存在 `daily_reports`(sent_status=failed),恢复后 `run.py --send --date YYYY-MM-DD` 从库重发,不重新采集;已 `sent` 不会重复发送。
 - **发送结果不确定(超时)**:置 `uncertain` 停止重发,避免重复推送;人工确认后可重新 `--send`。
-- **想要重置库**:删除 `data/ai_news_mvp.sqlite3` 后重跑即可(自动建表)。
+- **限流**:GitHub 403/429 不硬闯,记录并跳过该查询;HN 单条失败只计数。
+- **复用路径缺失**:设 `AI_NEWS_BRIEF_SRC` 指向原项目 `ai-news-brief/src` 目录。
+- **想要重置库**:删除 `../../data/ai_news_mvp.sqlite3` 后重跑即可(自动建表)。
 
-### 配置项说明(阶段05 相关)
+## 开发与运行统计(复盘用)
 
-- `paths.log_dir`(默认 `../../logs` = `/home/czq/ai_news/logs`)、`paths.data_dir`、`paths.db_file`;可用 `AI_NEWS_LOG_DIR` / `AI_NEWS_DATA_DIR` / `AI_NEWS_DB_PATH` 覆盖。
-- `rss.feed_max_entries` / `feed_max_bytes`:超大 feed 早期截断(OpenAI feed ~785KB)。
-- `github.retries` / `backoff_seconds` / `request_interval_seconds`:查询级重试与限速(search 30/min)。
-- `ollama.enabled`:`false` 时强制规则模式,不再尝试调用模型。
-- `feishu.max_retries` / `backoff_seconds` / `timeout`:明确失败退避重试次数;结果不确定不重试。
+> 本节数字来自真实运行日志(`logs/`)、运行统计 JSON(`data/ai_news_mvp_run_*.json`)与代码参数;**环境相关,仅供参考**。未精确统计的项均标注口径。
 
-## 配置项说明(全部)
+### 开发环境与工具
 
-见 `config.yaml` 内注释;秘密(`GITHUB_PAT` / `FEISHU_WEBHOOK_URL` / `FEISHU_WEBHOOK_KEYWORD`)只放 `.env`,不写入代码/日志/仓库。新增 `trend:`(阈值)、`topics.max_per_item`、`report:`(关键词/长度/各栏目条数上限)、`ollama:`(地址/模型/think/num_predict/输出条数)、`feishu:`(超时/重试/退避)段,含义见文件内注释。
+- **Python 版本**:3.14.4(开发环境虚拟环境实测;无锁死版本,`requirements.txt` 为下限约束)。
+- **关键依赖**:`requests`、`httpx[socks]`、`feedparser`、`curl_cffi`、`simhash`、`pyyaml`、`python-dotenv`、`beautifulsoup4`、`trafilatura`。
+- **复用来源**:[frankzch/ai-news-brief](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`,只读不改动):`rss_fetcher`、`lsh_dedup`、`log_config`(可选 `content_processor` / `fetch_stats`)。
+- **开发 agent 模型**:deepseek-v4-flash(平台编码 agent)。
 
-## 失败恢复
+### 模型使用
 
-- 来源级隔离:GitHub/HN/RSS/HF 各自独立 try/except + 超时 + 指数退避重试(2 次);单源失败不影响其他源。
-- 限流处理:GitHub 403/429 不硬闯,记录并跳过该查询;HN 单条失败只计数。
-- **Ollama 不可达/超时/输出非法 → 日报自动降级**(规则标签),不阻塞、不反复重试。
-- **飞书不可用 → 日报已在 `daily_reports`**,恢复后 `run.py --send --date YYYY-MM-DD` 从库重发,不重新采集;已 `sent` 的日报不会被重复发送。
-- **发送结果不确定(超时) → 置 `uncertain` 停止重发**,避免同一条消息被重复推送;人工确认后可重新 `--send`。
-- 重复运行安全:URL 冲突只更新 `last_seen_at`;快照/主题统计按主键幂等;想重置库删除 `data/ai_news_mvp.sqlite3` 即可。
-- 运行记录:`runs` 表记录每次运行状态(ok/partial/failed)、来源统计、错误、趋势输出。
-- 复用路径缺失:设 `AI_NEWS_BRIEF_SRC` 指向原项目 src。
+- **本地模型**:Ollama `Qwen3.5:9B`(`ollama.base_url` 指向局域网 Windows 开发台上的 Ollama)。
+- **参数**:`think: false`(关闭 thinking,该模型默认开 thinking)、`num_predict: 2048`(给足生成预算)、`format: json`(强制 JSON 输出)、`temperature: 0.2`。
+- **调用场景**:仅对入选「今日值得关注」的 Top `report.highlights_cap`(8)候选做一次性批量摘要;单次尝试,不重试。
+- **失败降级**:超时 / 服务不可达 / 输出非法(项目名不匹配、URL 非法、条数不足)→ 自动降级为规则标签(原标题 + 规则依据),不阻塞日报、不烧 token。当日日志实测记录过「摘要成功:5/8 条」与「服务不可达,降级为规则标签」两种路径。
+
+### 典型耗时(2026-10-14 实测,环境相关,仅供参考)
+
+- **完整采集 ≈ 68s**:GitHub 12.6s + HN 41.6s + RSS 13.5s + HF 约 2s(来源为当日运行统计 JSON 的 `time_s` 字段与运行日志;总时长含入库/快照/统计)。
+- **摘要环节视 Ollama 状态**:服务可达时一次成功调用(输出 5/8 条)约数秒~数十秒;不可达时立即降级,不增加耗时。
+- **定时建议**:采集 08:00,发送按「实测耗时 + 10 分钟冗余」推导。
+
+### Token 用量
+
+- **精确数字未统计**:运行日志与代码不记录每次调用的 token 明细,以下为**估算口径**,非实测值。
+- **每次主摘要调用输入**:Top 8 精简 JSON(`name/description/stars/stars_24h/created_days/topics`,description 截断 ≤120 字符、topics ≤5),约 8 条 × 150–200 字符 ≈ 1.2–1.6K 字符(中英混合,估算约 0.8–1.5K tokens)。
+- **输出上限**:`num_predict: 2048`;模型输出 3–5 条,每条 intro ≤50 字 + reason ≤80 字,实际输出远小于上限。
+- **每轮日报估算**:1 次主摘要调用(输入约 1.5K 字符 + 输出 ≤2K tokens)+ 提示词;「解决方案」摘要仅在 `report.fetch_summary: true` 时触发(默认 false,不调)。估算单轮 Ollama 摘要合计约 3–6K tokens,未精确计量。
+- **规则模式**(`ollama.enabled: false` 或 Ollama 不可达降级):token 用量为 0。
