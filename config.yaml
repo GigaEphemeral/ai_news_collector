@@ -76,6 +76,33 @@ hf_papers:
 dedup:
   simhash_threshold: 4         # 标题 SimHash 汉明距离阈值(越小越严格)
 
+# 规则趋势引擎(阶段03;纯规则、不评分、不调 LLM;阈值可按观察期调整)
+trend:
+  # 三个时间尺度各需要的最小历史天数(不足的窗口明确标注"窗口不足")
+  windows:
+    "24h": 2                   # 昨日 + 今日两个连续快照日即可算 24h 增量
+    "7d": 7                    # 近 7 个观察日
+    "30d": 30                  # 近 30 个观察日(前 7 天建基线,14 天看周趋势,30 天才启用月趋势)
+  project:
+    young_days: 30             # 创建 ≤ 30 天 → 新项目(新鲜度证据)
+    sudden_growth_ratio: 3.0   # 24h 增量 ≥ 前 7d 日均增量 × 3 → 突然增长
+    warming_min_days: 3        # 连续 N 天正增长且趋势不减 → 持续升温
+    warming_min_growth_pct: 0.5  # 连续窗口期累计增长率 < 该值(%)→ 幅度不足,标"尚待观察"
+    maturity_stars: 50000      # Star 总数 ≥ 该值 → 成熟期候选
+    maturity_growth_pct: 0.05  # 近 7 天日均增长率 ≤ 该值(%) → 稳定/成熟
+    decline_negative_days: 2   # 连续 N 天负增长 → 热度回落(不单日下结论)
+    stagnation_days: 7         # 连续 N 日入选且近 N 日增量≈0 → 降权(重复过滤)
+    stagnation_max_delta_pct: 0.05  # 近 N 天总增量 ≤ 该比例(%)视为无新变化
+  topic:
+    sudden_growth_ratio: 2.0   # 当日条目数 ≥ 前 N 日均值 × 2 → 突然增长
+    warming_min_days: 3        # 连续 N 天增量且 ≥1 天多来源 → 持续升温
+    maturity_min_count: 3      # 近 7 天日均条目数 ≥ 该值 → 成熟期候选
+    decline_negative_days: 2   # 连续 N 天条目数递减 → 热度回落
+
+# 主题归属(阶段03 topic_daily_stats)
+topics:
+  max_per_item: 3              # 每条目最多取 N 个主题(GitHub 取 extra.topics 前 N)
+
 # 规则初筛关键词(仅 HN/RSS/HF 标题+摘要命中判断;不做评分)
 keywords:
   ai:
