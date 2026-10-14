@@ -231,6 +231,77 @@ cd /home/czq/ai_news/code/ai-news-mvp
 - **时区**:autopilot 创建必须显式 `--timezone Asia/Shanghai`,否则默认 UTC(东八区下午 4 点)。
 - **幂等/不重复发送**:`daily_reports.sent_status='sent'` 的日报,重复 `--send` 直接跳过(不调用 webhook),可安全每日重复触发。
 
+### 定时任务配置步骤(步骤化,可直接照抄)
+
+本项目用**平台 autopilot**(多智能体,每天各建一个 issue,由对应 agent 真实执行)。CLI 全程等价于你在界面上做的操作:
+
+```bash
+# 1) 建 autopilot(采集环节)
+multica autopilot create \
+  --title "每日AI情报-采集" \
+  --description "<采集任务提示词,见下>" \
+  --agent <采集agent名或ID> \
+  --mode create_issue \
+  --issue-title-template "每日AI情报 采集 {{date}}" \
+  --project <project-id>          # 可选,归属项目
+
+# 2) 加定时触发 —— 必须显式 --timezone,否则默认 UTC(会偏 8 小时)
+multica autopilot trigger-add <autopilot-id> \
+  --kind schedule --cron "30 21 * * *" --timezone Asia/Shanghai --label "每日 21:30 采集"
+
+# 3) 查看/验证(trigger 的 next_run_at 应为东八区目标时刻)
+multica autopilot list
+multica autopilot get <autopilot-id>
+multica autopilot trigger-list <autopilot-id>
+# 执行历史
+multica autopilot runs <autopilot-id>
+
+# 4) 改时间:trigger-delete 旧触发 + trigger-add 新触发(update 只能改 agent/描述/状态,不能改 cron)
+multica autopilot trigger-list <autopilot-id>          # 拿到 trigger id
+multica autopilot trigger-delete <autopilot-id> <trigger-id>
+multica autopilot trigger-add <autopilot-id> --kind schedule --cron "0 8 * * *" --timezone Asia/Shanghai
+```
+
+**本项目已建好、可直接使用的两个 autopilot(2026-10-14 由成员创建,配置正确,次日生效):**
+
+| 名称 | autopilot id | agent | cron(Asia/Shanghai) | 下次执行 | 说明 |
+|---|---|---|---|---|---|
+| 每日AI情报-采集 | `67068dfa-8bc8-4e0f-9486-485d9c503f35` | 军情三处_dsf4 | `30 21 * * *`(每天 21:30) | 10-15 21:30 | 采集四源 → 写 SQLite/JSON → 汇报统计 |
+| 每日AI情报-日报发送 | `71b67a8a-63e7-40b3-b299-4b23a4683dd8` | 信使_qwenLocal | `45 21 * * *`(每天 21:45) | 10-15 21:45 | 幂等生成+发送飞书日报 |
+
+顺序合理(先采后发)。**无需重复创建**,要验证生效就看它们的 `runs` 历史与 issue。
+
+**立即真实测试(不必等明天)**:
+
+```bash
+# a) 手动触发 autopilot 一次(真建 issue 并执行,费用走你的账户)
+multica autopilot trigger <autopilot-id>
+
+# b) 或本地 cron 直跑全链路(不经过平台,最直接、无额外费用):
+crontab -e
+# 每天 08:00 采集+生成+发送
+0 8 * * * cd /home/czq/ai_news/code/ai-news-mvp && /home/czq/ai_news/code/.venv/bin/python run.py --since-days 7 --report --send >> /home/czq/ai_news/logs/cron.log 2>&1
+# 或拆分:21:30 只采集,21:45 生成并发送(与平台 autopilot 相同的两步节奏)
+30 21 * * * cd /home/czq/ai_news/code/ai-news-mvp && /home/czq/ai_news/code/.venv/bin/python run.py --since-days 7 >> /home/czq/ai_news/logs/cron.log 2>&1
+45 21 * * * cd /home/czq/ai_news/code/ai-news-mvp && /home/czq/ai_news/code/.venv/bin/python run.py --report --send --date $(date +\%Y-\%m-\%d) >> /home/czq/ai_news/logs/cron.log 2>&1
+```
+
+`.env` 由程序自动加载,无需手动 source;程序幂等,重复跑安全。
+
+**改造效果测试(随时可跑,不必等定时)**:
+
+```bash
+cd /home/czq/ai_news/code/ai-news-mvp
+# 看「今日值得关注」新生代排序/可解释上榜理由/一行摘要/分段统计(不调 Ollama,快)
+/home/czq/ai_news/code/.venv/bin/python run.py --report --no-summarize
+# 全链路:采集+生成+发飞书
+/home/czq/ai_news/code/.venv/bin/python run.py --report --send
+# 两天快照演示脚本(新生代优先 / 老项目增量达阈值上榜 / 空摘要注明理由)
+/home/czq/ai_news/code/.venv/bin/python scripts/demo_report_aiqi7.py
+# 全量测试
+/home/czq/ai_news/code/.venv/bin/python -m pytest tests/ -q
+```
+
 ### 运行日志路径
 
 - 运行统计 JSON:`/home/czq/ai_news/data/ai_news_mvp_run_YYYYMMDD.json`(来源统计/趋势结论/日报生成与发送结果,每次运行覆盖当日文件)。
