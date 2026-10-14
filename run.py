@@ -127,7 +127,8 @@ def main():
     stats = {'date': run_date, 'since_days': since_days, 'platforms': {}, 'dedup': {}, 'db': {}}
     per_platform = {}
 
-    # ---------- 1) GitHub(3 组 Search 查询,内部逐查询 try/except+重试) ----------
+    # ---------- 1) GitHub(3 组 Search 查询,内部逐查询 try/except+重试;跨组按 full_name 去重) ----------
+    # 阶段04修复(AIQI-7):采集器不再内部限量,限量在跨源去重之后执行。
     t0 = time.time()
     try:
         gh = GitHubCollector(cfg['github'], gh_pat)
@@ -143,7 +144,7 @@ def main():
         stats['platforms']['github'] = {'error': str(e), 'time_s': round(time.time() - t0, 1)}
         per_platform['github'] = []
 
-    # ---------- 2) Hacker News(官方 API,热度+关键词规则过滤) ----------
+    # ---------- 2) Hacker News(官方 API,热度+关键词规则过滤;不限量) ----------
     t0 = time.time()
     try:
         hn = HackerNewsCollector(cfg['hackernews'])
@@ -160,7 +161,7 @@ def main():
                 selected.append(e)
             else:
                 dropped['low_points'] = dropped.get('low_points', 0) + 1
-        selected = selected[:cfg['hackernews']['per_platform_cap']]
+        # 阶段04修复:不再在此限量,限量在跨源去重之后执行
         stats['platforms']['hackernews'] = {
             'fetched': hn_info['fetched_ids'], 'failed_items': hn_info['failed_items'],
             'top_level_error': hn_info.get('top_level_error'),
@@ -172,7 +173,7 @@ def main():
         stats['platforms']['hackernews'] = {'error': str(e), 'time_s': round(time.time() - t0, 1)}
         per_platform['hackernews'] = []
 
-    # ---------- 3) RSS 博客 + HF Daily Papers(每 feed 独立 try/except) ----------
+    # ---------- 3) RSS 博客 + HF Daily Papers(每 feed 独立 try/except;不限量) ----------
     t0 = time.time()
     try:
         rss_results, feed_failures = fetch_rss_and_hf(cfg)
@@ -185,9 +186,8 @@ def main():
         rss_cutoff = datetime.now(timezone.utc) - timedelta(days=cfg['rss']['max_age_days'])
         hf_cutoff = datetime.now(timezone.utc) - timedelta(days=cfg['hf_papers']['max_age_days'])
         rss_passed, rss_drop = rule_filter(rss_all, 'rss', rss_cutoff, keywords=cfg['keywords']['ai'])
-        rss_passed = rss_passed[:cfg['rss']['per_platform_cap']]
         hf_passed, hf_drop = rule_filter(hf_all, 'hf_papers', hf_cutoff, keywords=cfg['keywords']['ai'])
-        hf_passed = hf_passed[:cfg['hf_papers']['per_platform_cap']]
+        # 阶段04修复:不再在此限量,限量在跨源去重之后执行
         hf_name = cfg['hf_papers']['name']
         stats['platforms']['rss'] = {
             'fetched': len(rss_all), 'passed_rules': len(rss_passed), 'dropped': rss_drop,
@@ -207,13 +207,15 @@ def main():
         stats['platforms']['hf_papers'] = {'error': str(e)}
         per_platform['rss'], per_platform['hf_papers'] = [], []
 
-    # ---------- 4) 跨源去重:URL 归一化 + 标题 SimHash ----------
-    deduper = Deduper(threshold=cfg['dedup']['simhash_threshold'])
-    stored_items = []  # 去重后的统一条目
+    # ---------- 4) 处理顺序(阶段04修复 AIQI-7):规则筛选 → 跨源去重 → 每平台限量 ----------
+    # 4a) 跨源去重:URL 归一化 + 标题 SimHash + 标题/摘要相似度(阈值可配置)
+    deduper = Deduper(threshold=cfg['dedup']['simhash_threshold'],
+                      similarity_threshold=float(cfg.get('dedup', {}).get('similarity_threshold', 0.8)))
+    deduped = []  # 去重后的统一条目(未限量)
     for platform in ('github', 'hackernews', 'rss', 'hf_papers'):
         for e in per_platform[platform]:
-            if deduper.accept(url=e['url'], title=e['title']):
-                stored_items.append({
+            if deduper.accept(url=e['url'], title=e['title'], summary=e.get('summary', '')):
+                deduped.append({
                     'platform': platform,
                     'title': e['title'], 'url': e['url'],
                     'summary': e.get('summary', ''),
@@ -226,8 +228,37 @@ def main():
                 })
     stats['dedup'] = {
         'input': sum(len(v) for v in per_platform.values()),
-        'after_dedup': len(stored_items),
+        'after_dedup': len(deduped),
         'url_dups': deduper.url_dups, 'simhash_dups': deduper.simhash_dups,
+        'similarity_dups': deduper.similarity_dups,
+    }
+
+    # 4b) 每平台限量(跨源去重之后):GitHub 按 report.sort_by(新生代优先)排序后取上限
+    caps = {
+        'github': int(cfg['github']['per_platform_cap']),
+        'hackernews': int(cfg['hackernews']['per_platform_cap']),
+        'rss': int(cfg['rss']['per_platform_cap']),
+        'hf_papers': int(cfg['hf_papers']['per_platform_cap']),
+    }
+    after_cap = {p: 0 for p in caps}
+    stored_items = []
+    for platform in ('github', 'hackernews', 'rss', 'hf_papers'):
+        items = [it for it in deduped if it['platform'] == platform]
+        if platform == 'github' and items:
+            from src.ranking import github_entry_sort_key
+            cfg_r = cfg.get('report', {})
+            items.sort(key=lambda it: github_entry_sort_key(it, cfg_r, run_date, db))
+        # 非 GitHub 平台保持各自采集器/规则过滤后的顺序(热度/时间),只截断
+        items = items[:caps[platform]]
+        after_cap[platform] = len(items)
+        stored_items.extend(items)
+    stats['pipeline'] = {
+        'discovered': {p: int((stats['platforms'].get(p) or {}).get('fetched_raw')
+                              or (stats['platforms'].get(p) or {}).get('fetched') or 0)
+                       for p in caps},
+        'after_filter': {p: len(per_platform[p]) for p in caps},
+        'after_dedup': len(deduped),
+        'after_cap': after_cap,
     }
 
     # ---------- 5) 写 SQLite 全表 + 快照 + 主题统计 + 趋势 ----------
@@ -367,7 +398,10 @@ def main():
             sys.exit(1)
     print(f"\n[OK] 完成,{len(ok_platforms)}/4 个来源成功"
           f"(失败:{', '.join(failed_platforms) if failed_platforms else '无'})"
-          f",共 {stats['dedup']['after_dedup']} 条去重后条目")
+          f",发现 {sum(stats['pipeline']['discovered'].values())} → "
+          f"筛选 {sum(stats['pipeline']['after_filter'].values())} → "
+          f"去重 {stats['pipeline']['after_dedup']} → "
+          f"限量 {sum(stats['pipeline']['after_cap'].values())} 条")
 
 
 def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):

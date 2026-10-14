@@ -19,7 +19,7 @@ fetching:
 github:
   api_base: "https://api.github.com"
   per_page: 10                 # 每组查询每页上限(搜索 API)
-  per_platform_cap: 10         # 跨组去重后 GitHub 平台候选上限
+  per_platform_cap: 10         # 每平台候选上限(在跨源去重之后执行,见 run.py 处理顺序)
   sort: "stars"
   order: "desc"
   timeout: 30                  # 单请求超时(秒)
@@ -75,6 +75,7 @@ hf_papers:
 
 dedup:
   simhash_threshold: 4         # 标题 SimHash 汉明距离阈值(越小越严格)
+  similarity_threshold: 0.8    # 标题/摘要 token 集合 Jaccard 相似度 ≥ 该值 → 判为重复(阶段04修复 AIQI-7)
 
 # 规则趋势引擎(阶段03;纯规则、不评分、不调 LLM;阈值可按观察期调整)
 trend:
@@ -134,6 +135,7 @@ limits:
   per_platform_cap: 10         # 每个平台每日候选上限(硬性约束 #8)
 
 # ---- 阶段04:日报与飞书(秘密 FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_KEYWORD 只在 .env) ----
+# 阶段04修复(AIQI-7):排序策略/上榜理由/解决方案摘要,阈值全部可配置
 report:
   required_keyword: "每日ai情报"  # 飞书自定义机器人安全关键词(发送文本必须包含;env 可覆盖)
   max_chars: 6000                # 日报文本长度上限(超长自动裁剪,不发送失败)
@@ -143,6 +145,20 @@ report:
   solutions_max: 5               # 三、解决方案与产品发布 最多条数
   trends_projects_max: 3         # 四、趋势观察 项目最多条数
   trends_topics_max: 3           # 四、趋势观察 主题最多条数
+  # 排序策略(问题1修复,成员修正版:新生代优先,兼顾老项目增量):
+  #   freshness(默认):新生代(创建 ≤ new_days)优先;老项目仅当 24h 增量或增长率达阈值才允许上榜
+  #   growth: 按 24h Star 增量降序(有增量的在前,无增量数据垫底)
+  #   stars:  按 Star 总数降序(旧行为;仅当明确需要时选用)
+  sort_by: freshness
+  new_days: 30                   # 创建 ≤ 该天数 → 新生代(与 trend.project.young_days 一致)
+  old_repo_min_delta_24h: 50     # 老项目(创建 > new_days)上榜「今日值得关注」的最低 24h Star 增量
+  old_repo_min_growth_pct: 0.5   # 或 24h 增长率 ≥ 该值(%)(满足其一即可上榜)
+  recent_push_days: 7            # 快照不足(首日/无法算 24h 增量)时,新生代须近期 push 窗口(天)
+  # 解决方案与产品发布一行摘要(问题2修复,成员修正版):
+  #   fetch_summary=false(默认,成员自用不开启):只显示库中已有 summary,为空注明理由;
+  #   true:对入选条目抓正文首段(复用 content_processor)或调 Ollama 生成一句话摘要,仍失败则注明理由
+  fetch_summary: false
+  summary_max_chars: 80          # 「解决方案与产品发布」一行摘要最大长度
 
 ollama:
   base_url: "http://192.168.0.103:11434"  # Windows 笔记本上的 Ollama(局域网)

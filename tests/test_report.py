@@ -179,3 +179,169 @@ def test_save_daily_report_replaces_pending():
     assert db.save_daily_report(RUN_DATE, 'body v2') == 'replaced'
     assert db.get_daily_report(RUN_DATE)['body'] == 'body v2'
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# AIQI-7 问题1:今日值得关注 新生代优先 + 上榜理由可解释
+# ---------------------------------------------------------------------------
+def test_rule_highlights_new_generation_first():
+    """有快照时:新生代优先;老项目仅增量达阈值才上榜;上榜理由基于真实字段。"""
+    db = _seed(_make_db())
+    cands = collect_candidates(db, RUN_DATE, mini_cfg())
+    hl = rule_highlights(cands, mini_cfg())
+    names = [h['name'] for h in hl]
+    # agentkit 创建 10-11、ragflow 创建 10-12 均为新生代;两个都入选
+    assert 'acme/agentkit' in names and 'acme/ragflow' in names
+    for h in hl:
+        assert h['reason']
+        assert '规则标签' not in h['reason']  # 不再用模型/规则模糊话术
+        assert h['facts']
+
+
+def test_rule_highlights_excludes_old_without_delta():
+    """首日(无快照):老项目(如 ollama 1206 天)不上榜,宁缺毋滥不凑数。"""
+    db = _make_db()
+    now = '2026-10-14T08:00:00+00:00'
+    sid = db.upsert_source('github:search', 'GitHub Search API', 'github')
+    # 新生代 + 老项目(创建 1206 天,无快照无法算增量)
+    for i, (repo, created) in enumerate((('acme/newproj', '2026-10-11T00:00:00Z'),
+                                         ('ollama/ollama', '2023-07-01T00:00:00Z'))):
+        db.upsert_item(platform='github', title=repo, url=f'https://github.com/{repo}',
+                       summary='AI tool', published_at=now, content_hash=i,
+                       category='opensource', extra={
+                           'full_name': repo, 'stargazers_count': 100 if i == 0 else 183114,
+                           'created_at': created, 'topics': ['ai'],
+                       }, source_id=sid, first_seen_at=now)
+    cands = collect_candidates(db, RUN_DATE, mini_cfg())
+    hl = rule_highlights(cands, mini_cfg())
+    names = [h['name'] for h in hl]
+    assert 'acme/newproj' in names
+    assert 'ollama/ollama' not in names
+    # 上榜理由带「初步判断」(快照不足)
+    new_h = next(h for h in hl if h['name'] == 'acme/newproj')
+    assert '初步判断' in new_h['reason']
+    db.close()
+
+
+def test_rule_highlights_old_with_real_growth_allowed():
+    """老项目只要 24h 增量显著(≥阈值)也允许上榜(成员修正:不否认老项目价值)。"""
+    db = _make_db()
+    now = '2026-10-14T08:00:00+00:00'
+    sid = db.upsert_source('github:search', 'GitHub Search API', 'github')
+    db.upsert_snapshot('acme/oldbutgrowing', '2026-10-13', stars=1000, forks=10,
+                       pushed_at='2026-10-13T08:00:00Z', created_at='2024-01-01T00:00:00Z')
+    db.upsert_snapshot('acme/oldbutgrowing', RUN_DATE, stars=1300, forks=12,
+                       pushed_at='2026-10-14T08:00:00Z', created_at='2024-01-01T00:00:00Z',
+                       topics=['ai'], description='old project still growing')
+    db.upsert_item(platform='github', title='acme/oldbutgrowing',
+                   url='https://github.com/acme/oldbutgrowing',
+                   summary='old project still growing', published_at=now, content_hash=1,
+                   category='opensource', extra={
+                       'full_name': 'acme/oldbutgrowing', 'stargazers_count': 1300,
+                       'created_at': '2024-01-01T00:00:00Z', 'topics': ['ai'],
+                   }, source_id=sid, first_seen_at=now)
+    cands = collect_candidates(db, RUN_DATE, mini_cfg())
+    hl = rule_highlights(cands, mini_cfg())
+    names = [h['name'] for h in hl]
+    assert 'acme/oldbutgrowing' in names  # 24h +300 ≥ 阈值 50 → 上榜
+    h = next(h for h in hl if h['name'] == 'acme/oldbutgrowing')
+    assert '24h Star +300(前一日 1000)' in h['reason']
+    db.close()
+
+
+# ---------------------------------------------------------------------------
+# AIQI-7 问题2:解决方案与产品发布 一行精简摘要
+# ---------------------------------------------------------------------------
+def test_section3_resume_from_existing_summary():
+    """有 summary 的条目:显示一行精简摘要(≤ summary_max_chars)。"""
+    db = _seed(_make_db())
+    cands = collect_candidates(db, RUN_DATE, mini_cfg())
+    data = build_report(db, RUN_DATE, mini_cfg(), cands)
+    sec3 = data['body'].split('三、解决方案与产品发布')[1].split('四、趋势观察')[0]
+    lines = [l for l in sec3.strip().splitlines() if l.startswith('-')]
+    assert lines
+    for l in lines:
+        assert ' — ' in l
+        body = l.split(' — ', 1)[1]
+        assert body.strip()  # 非空
+
+
+def test_section3_empty_summary_notes_reason():
+    """summary 为空:注明无法产生摘要的理由,不显示空白。"""
+    db = _make_db()
+    sid = db.upsert_source('https://deepmind.google/blog/rss.xml', 'DeepMind', 'rss')
+    db.upsert_item(platform='rss', title='Developing Gemini 4 Argon responsibly',
+                   url='https://deepmind.google/blog/x', summary='',
+                   published_at='2026-10-14T08:00:00+00:00', content_hash=1,
+                   category='news', extra={}, source_id=sid,
+                   first_seen_at='2026-10-14T08:00:00+00:00')
+    cands = collect_candidates(db, RUN_DATE, mini_cfg())
+    data = build_report(db, RUN_DATE, mini_cfg(), cands)
+    sec3 = data['body'].split('三、解决方案与产品发布')[1].split('四、趋势观察')[0]
+    assert '原文未提供摘要' in sec3
+    db.close()
+
+
+def test_section3_fetch_summary_config_effect(monkeypatch):
+    """fetch_summary=true 时对入选条目抓正文首段;false(默认)不抓取只注明理由。"""
+    import src.summarize as summarize
+    calls = {'n': 0}
+    def fake_fetch(url, cfg):
+        calls['n'] += 1
+        return 'This is the first paragraph of the article body about gemini 4 argon.'
+    monkeypatch.setattr(summarize, '_fetch_first_paragraph', fake_fetch)
+
+    # 默认 false:不抓取
+    db = _make_db()
+    sid = db.upsert_source('https://deepmind.google/blog/rss.xml', 'DeepMind', 'rss')
+    db.upsert_item(platform='rss', title='Developing Gemini 4 Argon responsibly',
+                   url='https://deepmind.google/blog/x', summary='',
+                   published_at='2026-10-14T08:00:00+00:00', content_hash=1,
+                   category='news', extra={}, source_id=sid,
+                   first_seen_at='2026-10-14T08:00:00+00:00')
+    cfg = dict(mini_cfg(), report=dict(mini_cfg()['report'], fetch_summary=False))
+    cands = collect_candidates(db, RUN_DATE, cfg)
+    build_report(db, RUN_DATE, cfg, cands)
+    assert calls['n'] == 0
+    db.close()
+
+    # true:抓正文首段
+    db2 = _make_db()
+    sid2 = db2.upsert_source('https://deepmind.google/blog/rss.xml', 'DeepMind', 'rss')
+    db2.upsert_item(platform='rss', title='Developing Gemini 4 Argon responsibly',
+                    url='https://deepmind.google/blog/y', summary='',
+                    published_at='2026-10-14T08:00:00+00:00', content_hash=2,
+                    category='news', extra={}, source_id=sid2,
+                    first_seen_at='2026-10-14T08:00:00+00:00')
+    cfg2 = dict(mini_cfg(), report=dict(mini_cfg()['report'], fetch_summary=True))
+    cands2 = collect_candidates(db2, RUN_DATE, cfg2)
+    data2 = build_report(db2, RUN_DATE, cfg2, cands2)
+    assert calls['n'] == 1
+    assert 'first paragraph of the article' in data2['body']
+    db2.close()
+
+
+# ---------------------------------------------------------------------------
+# AIQI-7 问题3:采集状态分段显示(发现 → 筛选 → 去重 → 限量)
+# ---------------------------------------------------------------------------
+def test_section5_segmented_stats():
+    db = _seed(_make_db())
+    cands = collect_candidates(db, RUN_DATE, mini_cfg())
+    stats = {
+        'platforms': {'github': {'fetched_raw': 29, 'passed_rules': 4, 'after_cap': 2},
+                     'hackernews': {'fetched': 25, 'passed_rules': 1, 'after_cap': 1},
+                     'rss': {'fetched': 1036, 'passed_rules': 2, 'after_cap': 2},
+                     'hf_papers': {'fetched': 5, 'passed_rules': 1, 'after_cap': 1}},
+        'pipeline': {'discovered': {'github': 29, 'hackernews': 25, 'rss': 1036, 'hf_papers': 5},
+                     'after_filter': {'github': 4, 'hackernews': 1, 'rss': 2, 'hf_papers': 1},
+                     'after_dedup': 8,
+                     'after_cap': {'github': 2, 'hackernews': 1, 'rss': 2, 'hf_papers': 1}},
+        'dedup': {'after_dedup': 8},
+    }
+    data = build_report(db, RUN_DATE, mini_cfg(), cands, stats=stats)
+    sec5 = data['body'].split('五、采集状态')[1]
+    assert '发现:1095' in sec5
+    assert '筛选:8' in sec5
+    assert '去重:8' in sec5
+    assert '限量:6' in sec5
+    db.close()

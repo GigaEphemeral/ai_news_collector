@@ -100,7 +100,7 @@ def _stub_hn_fetch(self):
         entries.append({
             'title': title,
             'url': f'https://news.ycombinator.com/item?id={i + 100}',
-            'summary': 'discussion about llm and agents',
+            'summary': f'discussion about llm and agents (#{i + 100})',
             'published_at': (now - timedelta(hours=age_h)).isoformat(timespec='seconds'),
             'platform': 'hackernews', 'category': 'discussion',
             '_source_url': 'hackernews:topstories', '_source_name': 'Hacker News',
@@ -346,6 +346,121 @@ class TestFeishuDown:
         assert calls['n'] == 1, '已 sent 的日报重复 --send 不应再调用 webhook'
         db = _run_db(cfg_path)
         assert db.get_daily_report(RUN_DATE)['sent_status'] == 'sent'
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 6) AIQI-7 问题3:处理顺序 规则筛选 → 跨源去重 → 每平台限量
+# ---------------------------------------------------------------------------
+class TestPipelineOrder:
+    def test_filter_then_dedup_then_cap(self, monkeypatch, tmp_path):
+        """限量在跨源去重之后:GitHub 内部不再限量,先全量去重再按平台上限截断。"""
+        cfg_path = make_cfg(tmp_path)
+
+        # GitHub 返回 12 个仓库(超过 per_platform_cap=10),全部通过规则筛选
+        def gh_fetch_many(self, since_days):
+            now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            items = []
+            for i in range(12):
+                repo = f'acme/repo{i:02d}'
+                items.append({
+                    'title': repo, 'url': f'https://github.com/{repo}',
+                    'summary': f'AI agent repo {i}',
+                    'published_at': '2026-10-10T00:00:00+00:00',
+                    'platform': 'github', 'category': 'opensource',
+                    '_source_url': 'github:search', '_source_name': 'GitHub Search API',
+                    'extra': {'full_name': repo, 'html_url': f'https://github.com/{repo}',
+                              'stargazers_count': 1000 - i, 'forks_count': 10,
+                              'created_at': '2026-10-01T00:00:00Z',
+                              'pushed_at': '2026-10-14T00:00:00Z',
+                              'description': f'AI agent repo {i}', 'language': 'Python',
+                              'topics': ['ai', 'agents'], 'fetched_at': now},
+                })
+            return items, {'raw_items': 12, 'queries_done': 3, 'queries_failed': 0,
+                           'rate_limited': False, 'cap': 10, 'per_query': []}
+        monkeypatch.setattr(GitHubCollector, 'fetch', gh_fetch_many)
+        _stub_hn_rss(monkeypatch)
+        monkeypatch.setenv('GITHUB_PAT', '')
+
+        code = _run(monkeypatch, _argv(cfg_path, '--since-days', '1', '--date', RUN_DATE))
+        assert code == 0
+
+        out = _read_out_json(cfg_path, RUN_DATE)
+        # 发现 12 → 筛选 12 → 去重 12(无跨源重复)→ 限量 10(GitHub 上限)
+        assert out['pipeline']['discovered']['github'] == 12
+        assert out['pipeline']['after_filter']['github'] == 12
+        assert out['pipeline']['after_dedup'] >= 12
+        assert out['pipeline']['after_cap']['github'] == 10
+        assert out['dedup']['input'] == 12 + 2 + 1 + 1  # GH 12 + HN 2 + RSS 1 + HF 1
+        assert out['dedup']['after_dedup'] == 12 + 2 + 1 + 1
+        db = _run_db(cfg_path)
+        n_gh = db.conn.execute(
+            "SELECT count(*) FROM items WHERE platform='github'").fetchone()[0]
+        assert n_gh == 10  # 限量后入库 10 条,而非 12
+        db.close()
+
+    def test_cross_source_similarity_dedup(self, monkeypatch, tmp_path):
+        """跨源相似度去重:同一项目在 GitHub 与 HN 标题高度相似(≥0.8)→ 判重复。"""
+        cfg_path = make_cfg(tmp_path)
+
+        def gh_fetch_sim(self, since_days):
+            now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            return [{
+                'title': 'Gemini 4 Argon is a new model from Google DeepMind focused on safety',
+                'url': 'https://github.com/acme/agentkit',
+                'summary': 'AI agent framework for llm serving',
+                'published_at': '2026-10-10T00:00:00+00:00',
+                'platform': 'github', 'category': 'opensource',
+                '_source_url': 'github:search', '_source_name': 'GitHub Search API',
+                'extra': {'full_name': 'acme/agentkit',
+                          'html_url': 'https://github.com/acme/agentkit',
+                          'stargazers_count': 500, 'forks_count': 10,
+                          'created_at': '2026-10-01T00:00:00Z',
+                          'pushed_at': '2026-10-14T00:00:00Z',
+                          'description': 'AI agent framework for llm serving',
+                          'language': 'Python', 'topics': ['ai'], 'fetched_at': now},
+            }], {'raw_items': 1, 'queries_done': 3, 'queries_failed': 0,
+                 'rate_limited': False, 'cap': 10, 'per_query': []}
+        monkeypatch.setattr(GitHubCollector, 'fetch', gh_fetch_sim)
+
+        now = datetime.now(timezone.utc)
+        def hn_sim(self):
+            entries = [{
+                'title': 'Gemini 4 Argon is a new model from Google DeepMind focused on safety and alignment',
+                'url': 'https://news.ycombinator.com/item?id=777',
+                'summary': 'same project discussed on HN',
+                'published_at': (now - timedelta(hours=3)).isoformat(timespec='seconds'),
+                'platform': 'hackernews', 'category': 'discussion',
+                '_source_url': 'hackernews:topstories', '_source_name': 'Hacker News',
+                'extra': {'points': 300, 'comments': 10, 'hn_id': 777},
+            }]
+            return entries, {'fetched_ids': 1, 'failed_items': 0}
+        monkeypatch.setattr(HackerNewsCollector, 'fetch', hn_sim)
+
+        def rss_sim(cfg):
+            return {'OpenAI Blog': [{
+                'title': 'OpenAI releases new reasoning model',
+                'url': 'https://openai.com/blog/x',
+                'summary': 'a new llm reasoning model',
+                'published_at': (now - timedelta(hours=4)).isoformat(timespec='seconds'),
+                'platform': 'rss', 'category': 'news',
+                '_source_url': 'https://openai.com/news/rss.xml',
+                '_source_name': 'OpenAI Blog'}],
+                'HF Daily Papers': []}, {}
+        monkeypatch.setattr(run_module, 'fetch_rss_and_hf', rss_sim)
+        monkeypatch.setenv('GITHUB_PAT', '')
+
+        code = _run(monkeypatch, _argv(cfg_path, '--since-days', '1', '--date', RUN_DATE))
+        assert code == 0
+        out = _read_out_json(cfg_path, RUN_DATE)
+        assert out['dedup']['input'] == 3  # GH 1 + HN 1 + RSS 1
+        assert out['dedup']['after_dedup'] == 2  # HN 与 GH 相似 → 去重
+        assert out['dedup']['similarity_dups'] == 1
+        assert out['pipeline']['after_cap']['hackernews'] == 0  # HN 条目被判重复,限量 0
+        db = _run_db(cfg_path)
+        n_hn = db.conn.execute(
+            "SELECT count(*) FROM items WHERE platform='hackernews'").fetchone()[0]
+        assert n_hn == 0
         db.close()
 
 

@@ -103,11 +103,16 @@ def collect_candidates(db, run_date, cfg, trends=None):
     每个候选携带:
       name / title / url / summary / platform / category / published_at
       stars(GitHub stargazers、HN points)/ stars_24h(GitHub 快照差值)
-      created_days / topics / tags(规则标签)/ score(平台内排序指标)
+      created_days / pushed_days / topics / tags(规则标签)/ score(平台内排序指标)
     不做综合评分;排序仅在同一平台内按可观测指标进行(硬性约束 #6)。
+
+    阶段04修复(AIQI-7):GitHub 候选按 report.sort_by(默认 freshness:新生代优先,
+    老项目仅当 24h 增量达阈值)排序,而非 star 总数;排序规则在 config.yaml 的
+    report: 段可配置(成员修正版)。
     """
+    from .ranking import github_sort_key
     cfg_r = cfg.get('report', {})
-    young_days = int(cfg.get('trend', {}).get('project', {}).get('young_days', 30))
+    young_days = int(cfg_r.get('new_days', cfg.get('trend', {}).get('project', {}).get('young_days', 30)))
     run_date = parse_date(run_date) or datetime.now(timezone.utc).date()
 
     state_map = {}
@@ -143,6 +148,9 @@ def collect_candidates(db, run_date, cfg, trends=None):
             created = _parse_iso(extra.get('created_at'))
             if created:
                 cand['created_days'] = max((run_date - created.date()).days, 0)
+            pushed = _parse_iso(extra.get('pushed_at'))
+            if pushed:
+                cand['pushed_days'] = max((run_date - pushed.date()).days, 0)
             cand['topics'] = (extra.get('topics') or [])[:5]
             state = state_map.get(full)
             if state:
@@ -172,9 +180,12 @@ def collect_candidates(db, run_date, cfg, trends=None):
                 cand['tags'].append('官方博客')
         candidates.append(cand)
 
-    # 平台内按指标降序;全局按平台优先级(github → hackernews → rss/hf)保序
+    # 平台内排序:GitHub 按 report.sort_by(默认新生代优先)排序;其他平台按指标降序。
+    # 全局按平台优先级(github → hackernews → rss/hf)保序。
     order = {'github': 0, 'hackernews': 1, 'rss': 2, 'hf_papers': 3}
-    candidates.sort(key=lambda c: (order.get(c['platform'], 9), -c['score']))
+    candidates.sort(key=lambda c: ((0, *github_sort_key(c, cfg_r))
+                                   if c['platform'] == 'github'
+                                   else (order.get(c['platform'], 9), -c['score'])))
     return candidates
 
 
@@ -192,42 +203,61 @@ def _facts_line(cand):
     return ' · '.join(parts) or '规则筛选入选'
 
 
+def _has_delta_data(candidates):
+    """是否有任意 GitHub 候选能算 24h 增量(快照 ≥ 2 天)。"""
+    return any(c.get('stars_24h') is not None for c in candidates if c['platform'] == 'github')
+
+
 def rule_highlights(candidates, cfg):
     """规则降级/非模型模式:原标题 + 规则标签(事实),最多 max_highlights 条。
 
-    选择策略(纯规则,非评分):优先带趋势状态的 GitHub 项目(新出现/持续升温/
-    突然增长/热度回落),再补 1 条 HN/RSS/HF 指标最高者;凑不满不硬凑。
+    阶段04修复(AIQI-7,成员修正版):「新生代优先,兼顾老项目增量」。
+      - GitHub:按 report.sort_by 排序(默认 freshness),再按资格过滤:
+        新生代(创建 ≤ new_days)全入选;老项目仅当 24h 增量/增长率达阈值入选;
+        快照不足(首日)时仅新生代且近期 push 入选并标注「初步判断」;
+        宁可少选,不把无增量的老项目顶上来凑数(栏目允许为空)。
+      - 非 GitHub:各平台指标最高者补位。
+      每条上榜理由来自库中真实字段(ranking.selection_reason),可解释。
     """
+    from .ranking import github_eligible, github_sort_key, selection_reason
     cfg_r = cfg.get('report', {})
     max_h = int(cfg_r.get('max_highlights', 3))
-    gh = [c for c in candidates if c['platform'] == 'github' and c.get('tags')]
-    gh.sort(key=lambda c: c['score'], reverse=True)
-    gh = gh[:max(0, max_h - 1)]
+    has_delta = _has_delta_data(candidates)
+
+    gh = [c for c in candidates if c['platform'] == 'github']
+    gh = [c for c in gh if github_eligible(c, cfg_r, has_delta)]
+    gh.sort(key=lambda c: github_sort_key(c, cfg_r))
+    gh = gh[:max_h]
     rest = [c for c in candidates if c['platform'] != 'github']
     rest.sort(key=lambda c: c['score'], reverse=True)
-    rest = rest[:1] if max_h - len(gh) > 0 else []
+    rest = rest[:max(0, max_h - len(gh))]
     chosen = gh + rest
 
     highlights = []
     for c in chosen[:max_h]:
         intro = _clamp(c['summary'], 60) or f"{c['platform']}:{c['category']}"
         facts = _facts_line(c)
-        tags = '、'.join(c['tags']) or '规则筛选入选'
+        reason = selection_reason(c, cfg_r, has_delta)
         highlights.append({
             'name': c['name'], 'url': c['url'], 'intro': intro,
-            'reason': f'规则标签:{tags}', 'facts': facts,
+            'reason': reason, 'facts': facts,
         })
     return highlights
 
 
-def _enrich_facts(highlights, candidates):
-    """Ollama 摘要条目缺事实串时,从候选数据(库中可观测指标)补上。"""
+def _enrich_facts(highlights, candidates, cfg):
+    """Ollama 摘要条目缺事实串时补上;上榜理由一律改用库中真实字段(成员要求:
+    不用模型编造的模糊话术,上榜理由必须可解释)。"""
+    from .ranking import selection_reason
+    cfg_r = cfg.get('report', {})
+    has_delta = _has_delta_data(candidates)
     by_name = {c['name']: c for c in candidates}
     for h in highlights:
-        if not h.get('facts'):
-            c = by_name.get(h['name'])
-            if c:
+        c = by_name.get(h['name'])
+        if c:
+            if not h.get('facts'):
                 h['facts'] = _facts_line(c)
+            h['reason'] = selection_reason(c, cfg_r, has_delta)
     return highlights
 
 
@@ -250,9 +280,10 @@ def _section1(highlights):
 
 
 def _section2(candidates, cfg_r):
-    """二、开源项目与工程实践(GitHub 项目)。"""
+    """二、开源项目与工程实践(GitHub 项目;阶段04修复:按 report.sort_by 新生代优先)。"""
+    from .ranking import github_sort_key
     gh = [c for c in candidates if c['platform'] == 'github']
-    gh.sort(key=lambda c: (STATE_ORDER.index(c['tags'][0]) if c.get('tags') and c['tags'][0] in STATE_ORDER else 99, -c['score']))
+    gh.sort(key=lambda c: github_sort_key(c, cfg_r))
     gh = gh[:int(cfg_r.get('opensource_max', 5))]
     lines = []
     for c in gh:
@@ -264,14 +295,24 @@ def _section2(candidates, cfg_r):
     return lines
 
 
-def _section3(candidates, cfg_r):
-    """三、解决方案与产品发布(官方博客 RSS / HF 论文)。"""
+def _section3(candidates, cfg_r, resume_map=None):
+    """三、解决方案与产品发布(官方博客 RSS / HF 论文;阶段04修复:每条带精简摘要)。
+
+    resume_map: {url: {'summary': str, 'reason': str}}(见 build_solution_resumes);
+    摘要为空时注明无法产生摘要的理由,不显示空白。
+    """
     sol = [c for c in candidates if c['platform'] in ('rss', 'hf_papers')]
     sol = sol[:int(cfg_r.get('solutions_max', 5))]
+    max_chars = int(cfg_r.get('summary_max_chars', 80))
     lines = []
     for c in sol:
         tag = '、'.join(c['tags']) if c['tags'] else c['category']
-        desc = _clamp(c['summary'], 70)
+        res = (resume_map or {}).get(c['url']) or {}
+        summary = res.get('summary') or _clamp(c['summary'], max_chars)
+        if summary:
+            desc = _clamp(summary, max_chars)
+        else:
+            desc = res.get('reason') or '原文未提供摘要'
         lines.append(f"- {c['title']} [{tag}] — {desc} · {c['url']}")
     return lines
 
@@ -316,7 +357,11 @@ def _pick_evidence(evidence):
 
 
 def _section5(stats, db, run_date, cfg, model_meta):
-    """五、采集状态:成功源数/发现条目/去重后/模型状态/失败源。"""
+    """五、采集状态:成功源数/发现→筛选→去重→限量 分段/模型状态/失败源。
+
+    阶段04修复(AIQI-7,问题3):统计口径如实分段显示(发现 → 规则筛选 → 去重 →
+    限量),不再用「去重后」掩盖中间步骤。
+    """
     platforms = stats.get('platforms', {}) if stats else {}
     names = ('github', 'hackernews', 'rss', 'hf_papers')
     failed_platforms = set()
@@ -329,19 +374,29 @@ def _section5(stats, db, run_date, cfg, model_meta):
     total = len(names)
     ok = total - len([p for p in failed_platforms if p in names])
 
-    fetched = 0
-    for p in names:
-        s = platforms.get(p, {})
-        if isinstance(s, dict):
-            fetched += int(s.get('fetched_raw') or s.get('fetched') or 0)
-    dedup = 0
-    if stats and stats.get('dedup'):
-        dedup = int(stats['dedup'].get('after_dedup', 0))
-    if not dedup:
-        try:
-            dedup = len(db.items_first_seen_on(run_date.isoformat()))
-        except Exception:
-            dedup = 0
+    # 分段统计:发现 → 规则筛选 → 去重 → 限量
+    pipeline = (stats or {}).get('pipeline', {}) if stats else {}
+    discovered = sum(int(v or 0) for v in pipeline.get('discovered', {}).values()) if pipeline else 0
+    after_filter = sum(int(v or 0) for v in pipeline.get('after_filter', {}).values()) if pipeline else 0
+    after_dedup = int(pipeline.get('after_dedup', 0)) if pipeline else 0
+    after_cap = sum(int(v or 0) for v in pipeline.get('after_cap', {}).values()) if pipeline else 0
+    if not discovered:  # 兼容旧 runs(无 pipeline)
+        fetched = 0
+        for p in names:
+            s = platforms.get(p, {})
+            if isinstance(s, dict):
+                fetched += int(s.get('fetched_raw') or s.get('fetched') or 0)
+        discovered = fetched
+        after_filter = sum(int((platforms.get(p) or {}).get('passed_rules') or 0) for p in names)
+        after_dedup = 0
+        if stats and stats.get('dedup'):
+            after_dedup = int(stats['dedup'].get('after_dedup', 0))
+        if not after_dedup:
+            try:
+                after_dedup = len(db.items_first_seen_on(run_date.isoformat()))
+            except Exception:
+                after_dedup = 0
+        after_cap = after_dedup
 
     model = model_meta or {'status': '未调用', 'mode': 'rule'}
     model_line = model.get('status', '未调用')
@@ -366,7 +421,8 @@ def _section5(stats, db, run_date, cfg, model_meta):
     fail_text = '、'.join(fail_names) if fail_names else '无'
 
     return [
-        f"成功来源:{ok}/{total} · 发现条目:{fetched} · 去重后:{dedup}",
+        f"成功来源:{ok}/{total} · 发现:{discovered} → 筛选:{after_filter} "
+        f"→ 去重:{after_dedup} → 限量:{after_cap}",
         f"模型状态:{model_line}",
         f"失败来源:{fail_text}",
     ]
@@ -426,12 +482,13 @@ def build_report(db, run_date, cfg, candidates, stats=None, trends=None,
 
     cfg_r = cfg.get('report', {})
     highlights = highlights if highlights is not None else rule_highlights(candidates, cfg)
-    highlights = _enrich_facts(highlights, candidates)
+    highlights = _enrich_facts(highlights, candidates, cfg)
+    resume_map = _build_resume_map(candidates, cfg)
 
     sections = {
         1: _section1(highlights),
         2: _section2(candidates, cfg_r),
-        3: _section3(candidates, cfg_r),
+        3: _section3(candidates, cfg_r, resume_map),
         4: _section4(trends, cfg_r, run_date),
         5: _section5(stats, db, run_date, cfg, model_meta),
     }
@@ -467,7 +524,7 @@ def _build_trends(db, run_date, cfg):
 
 
 def _derive_stats(db, run_date):
-    """standalone 生成日报时,从 runs/sources 表反推采集统计。"""
+    """standalone 生成日报时,从 runs/sources 表反推采集统计(分段口径)。"""
     stats = {'platforms': {}, 'dedup': {'after_dedup': 0}, '_run_errors': {}}
     run = db.latest_run_for_date(run_date.isoformat())
     if run:
@@ -481,3 +538,26 @@ def _derive_stats(db, run_date):
     except Exception:
         pass
     return stats
+
+
+def _build_resume_map(candidates, cfg):
+    """入选「解决方案与产品发布」条目的精简摘要 map(问题2修复,成员修正版)。
+
+    摘要来源优先级:库中已有 summary → report.fetch_summary=true 时抓正文首段
+    (复用 content_processor)或调 Ollama 一句话摘要(仅对入选 ≤solutions_max 条,
+    不反复重试烧 token)→ 仍为空则注明无法产生摘要的理由。
+
+    返回 {url: {'summary': str, 'reason': str}}。fetch_summary 默认 false:
+    只显示库中已有 summary,为空注明理由。
+    """
+    cfg_r = cfg.get('report', {})
+    sol = [c for c in candidates if c['platform'] in ('rss', 'hf_papers')]
+    sol = sol[:int(cfg_r.get('solutions_max', 5))]
+    if not sol:
+        return {}
+    try:
+        from .summarize import build_solution_resumes
+        return build_solution_resumes(sol, cfg)
+    except Exception as e:
+        log.warning(f'解决方案摘要生成失败,回退到库中 summary: {e}')
+        return {}  # 回退:由 _section3 显示库中已有 summary 或注明理由
