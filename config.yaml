@@ -1,0 +1,107 @@
+# AI 情报 MVP · 阶段02 采集配置
+# 非秘密配置放这里;秘密(如 GITHUB_PAT)一律只放 /home/czq/ai_news/.env
+app:
+  name: ai-news-mvp
+  since_days_default: 7        # run.py 默认采集窗口(--since-days 可覆盖)
+
+# 相对项目根(code/ai-news-mvp)的路径;可用环境变量覆盖:
+#   AI_NEWS_DATA_DIR / AI_NEWS_LOG_DIR / AI_NEWS_DB_PATH / AI_NEWS_ENV_PATH
+paths:
+  data_dir: "../../data"       # 指向 /home/czq/ai_news/data(与阶段01试跑一致)
+  log_dir: "../../logs"        # 指向 /home/czq/ai_news/logs
+  db_file: "ai_news_mvp.sqlite3"
+
+# 复用原项目 rss_fetcher 时,它通过 ConfigLoader 单例读取以下键(勿删)
+fetching:
+  network_timeout: 90
+  hf_daily_top_n: 5            # HF Daily Papers 按(upvotes+stars)排名保留前 N 篇
+
+github:
+  api_base: "https://api.github.com"
+  per_page: 10                 # 每组查询每页上限(搜索 API)
+  per_platform_cap: 10         # 跨组去重后 GitHub 平台候选上限
+  sort: "stars"
+  order: "desc"
+  timeout: 30                  # 单请求超时(秒)
+  retries: 2                   # 5xx/网络错误退避重试次数(403/429 不硬闯)
+  backoff_seconds: 2           # 退避基数(指数退避:2s,4s)
+  request_interval_seconds: 1.2  # search API 30/min,查询间留余量
+  queries:                     # 3 组查询模板,{d} = 程序动态计算的 YYYY-MM-DD
+    - name: "新项目"
+      template: "topic:ai created:>{d} stars:>=20"
+    - name: "新兴Agent"
+      template: "topic:agents pushed:>{d} stars:>=50"
+    - name: "活跃LLM项目"
+      template: "topic:llm pushed:>{d} stars:>=100"
+
+hackernews:
+  api_base: "https://hacker-news.firebaseio.com/v0"
+  top_n: 25                    # topstories 取前 N 条
+  min_points: 100              # 热度阈值(score)
+  min_age_hours: 2             # 过新帖子热度未聚集,过滤
+  max_age_days: 3              # 帖子最大年龄
+  per_platform_cap: 10
+  timeout: 30
+  retries: 2
+  backoff_seconds: 2
+
+rss:
+  max_age_days: 7              # 普通博客条目最大年龄
+  per_platform_cap: 10         # RSS 平台(全部博客合并)候选上限
+  feed_max_entries: 30         # 超大 feed 早期截断:最多保留前 N 条
+  feed_max_bytes: 262144       # 超过该字节数触发截断(OpenAI feed ~785KB)
+  timeout: 60
+  retries: 2
+  backoff_seconds: 2
+  sources:
+    - name: "OpenAI Blog"
+      url: "https://openai.com/news/rss.xml"
+      category: "news"
+    - name: "Hugging Face Blog"
+      url: "https://huggingface.co/blog/feed.xml"
+      category: "news"
+    - name: "Google DeepMind Blog"
+      url: "https://deepmind.google/blog/rss.xml"
+      category: "news"
+    - name: "NVIDIA Developer Blog"
+      url: "https://developer.nvidia.com/blog/feed/"
+      category: "news"
+
+hf_papers:
+  url: "https://huggingface.co/api/daily_papers"
+  name: "HF Daily Papers"
+  per_platform_cap: 10         # HF 平台候选上限(实际条目数由 fetching.hf_daily_top_n 决定)
+  max_age_days: 14             # HF 按周批,放宽年龄窗口
+
+dedup:
+  simhash_threshold: 4         # 标题 SimHash 汉明距离阈值(越小越严格)
+
+# 规则初筛关键词(仅 HN/RSS/HF 标题+摘要命中判断;不做评分)
+keywords:
+  ai:
+    - "ai"
+    - "llm"
+    - "gpt"
+    - "agent"
+    - "rag"
+    - "anthropic"
+    - "openai"
+    - "deepseek"
+    - "gemini"
+    - "claude"
+    - "codex"
+    - "inference"
+    - "diffusion"
+    - "transformer"
+    - "machine learning"
+    - "neural"
+    - "fine-tun"
+    - "finetun"
+    - "model serving"
+    - "embedding"
+    - "multimodal"
+    - "reasoning model"
+    - "agentic"
+
+limits:
+  per_platform_cap: 10         # 每个平台每日候选上限(硬性约束 #8)
