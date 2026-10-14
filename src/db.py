@@ -145,6 +145,7 @@ class Database:
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.execute('PRAGMA foreign_keys=ON')
         self.conn.executescript(SCHEMA)
+        self._migrate_daily_reports()
         self.fts_available = False
         try:
             self.conn.executescript(FTS_SCHEMA)
@@ -159,6 +160,85 @@ class Database:
             self.conn.rollback()
         self.conn.commit()
         logging.info(f'SQLite 就绪: {db_path}(FTS5={"可用" if self.fts_available else "降级"})')
+
+    def _migrate_daily_reports(self):
+        """阶段04:给已存在的 daily_reports 表补 last_error 列(旧库无此列)。"""
+        for ddl in ('ALTER TABLE daily_reports ADD COLUMN last_error TEXT',):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+        self.conn.commit()
+
+    # ---------- daily_reports(阶段04:日报正文 + 发送状态) ----------
+    def get_daily_report(self, report_date):
+        return self.conn.execute(
+            'SELECT * FROM daily_reports WHERE report_date=?', (report_date,)).fetchone()
+
+    def save_daily_report(self, report_date, body, generated_at=None):
+        """保存/更新某日日报正文。
+
+        幂等规则:已成功发送(sent)的日报不覆盖,防止重新生成覆盖"已送达"事实;
+        pending/failed/uncertain 可重新生成(重置为 pending,允许从库重发)。
+        返回 'saved' / 'replaced' / 'skipped_sent'。
+        """
+        row = self.get_daily_report(report_date)
+        if row and row['sent_status'] == 'sent':
+            return 'skipped_sent'
+        now = generated_at or utcnow_iso()
+        self.conn.execute(
+            '''INSERT INTO daily_reports (report_date, body, generated_at,
+                                          sent_status, retry_count)
+               VALUES (?, ?, ?, 'pending', 0)
+               ON CONFLICT(report_date) DO UPDATE SET
+                 body=excluded.body, generated_at=excluded.generated_at,
+                 sent_status='pending', sent_at=NULL, retry_count=0,
+                 last_error=NULL''',
+            (report_date, body, now))
+        self.conn.commit()
+        return 'replaced' if row else 'saved'
+
+    def mark_report_sent(self, report_date, sent_at=None):
+        """发送成功后置 sent(只有成功才调用)。"""
+        self.conn.execute(
+            "UPDATE daily_reports SET sent_status='sent', sent_at=?, last_error=NULL "
+            "WHERE report_date=?", (sent_at or utcnow_iso(), report_date))
+        self.conn.commit()
+
+    def mark_report_failed(self, report_date, error=None):
+        """明确失败(HTTP 返回非 0 且重试耗尽)。"""
+        self.conn.execute(
+            "UPDATE daily_reports SET sent_status='failed', retry_count=retry_count+1, "
+            "last_error=? WHERE report_date=?", (error, report_date))
+        self.conn.commit()
+
+    def mark_report_uncertain(self, report_date, error=None):
+        """结果不确定(超时/响应无法解析)→ 停止重发,避免重复发送。"""
+        self.conn.execute(
+            "UPDATE daily_reports SET sent_status='uncertain', retry_count=retry_count+1, "
+            "last_error=? WHERE report_date=?", (error, report_date))
+        self.conn.commit()
+
+    def items_first_seen_on(self, date):
+        """某日首次出现的去重后条目(日报候选/采集状态统计用)。"""
+        return self.conn.execute(
+            'SELECT * FROM items WHERE date(first_seen_at)=? ORDER BY id', (date,)).fetchall()
+
+    def latest_run_for_date(self, date):
+        """指定日期的最近一次运行记录(standalone 生成日报时反推采集统计)。"""
+        return self.conn.execute(
+            'SELECT * FROM runs WHERE run_date=? ORDER BY started_at DESC, id DESC LIMIT 1',
+            (date,)).fetchone()
+
+    def failed_sources(self):
+        """当前 last_error 非空的来源(采集状态:失败源)。"""
+        return self.conn.execute(
+            "SELECT url, name, last_error FROM sources "
+            "WHERE last_error IS NOT NULL AND last_error != ''").fetchall()
+
+    def count_sources_enabled(self):
+        return self.conn.execute(
+            'SELECT count(*) FROM sources WHERE enabled=1').fetchone()[0]
 
     # ---------- sources / items(阶段02,保持兼容) ----------
     def upsert_source(self, url, name, category, last_fetch_at=None, last_error=None):
@@ -373,3 +453,10 @@ class Database:
             self.conn.close()
         except Exception:
             pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
