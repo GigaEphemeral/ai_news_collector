@@ -143,7 +143,7 @@ def test_degraded_on_connection_error(monkeypatch):
     assert '降级' in meta['status']
     assert hl  # 降级后仍有原标题+规则标签
     for h in hl:
-        assert h['url'].startswith('http') and h['reason'].startswith('规则标签')
+        assert h['url'].startswith('http') and h['reason']  # AIQI-7:上榜理由改为库中真实字段,不再用模糊话术
 
 
 def test_degraded_on_timeout(monkeypatch):

@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-"""去重:URL 归一化 + 标题 SimHash(复用原项目 lsh_dedup 的 compute_simhash/is_similar)。"""
+"""去重:URL 归一化 + 标题 SimHash + 标题/摘要相似度(阶段04修复 AIQI-7)。
+
+问题3 修复(成员修正版:规则筛选 → 去重 → 限量,并增加相似度去重):
+  - URL 归一化(原有)
+  - 标题 SimHash 汉明距离阈值(原有)
+  - 标题或摘要 token 集合 Jaccard 相似度 ≥ dedup.similarity_threshold(默认 0.8,八成)
+    → 判为重复(新增;阈值可配置,README 已注明)
+"""
+import re
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from .reuse import ensure_reuse_path
@@ -7,6 +15,28 @@ from .reuse import ensure_reuse_path
 ensure_reuse_path()
 
 from lsh_dedup import compute_simhash, is_similar  # noqa: E402
+
+_CJK_RE = re.compile(r'[\u4e00-\u9fff]')
+_WORD_RE = re.compile(r'[a-z0-9]+')
+
+
+def _tokens(text):
+    """标题/摘要 → token 集合:英文按词,中文按字符二元组。
+
+    用于 Jaccard 相似度去重(英文标题、中文标题、摘要都能稳定比较)。
+    """
+    text = (text or '').lower()
+    words = set(_WORD_RE.findall(text))
+    cjk = _CJK_RE.findall(text)
+    bigrams = {cjk[i] + cjk[i + 1] for i in range(len(cjk) - 1)}
+    return words | bigrams
+
+
+def jaccard_similarity(a, b):
+    """两 token 集合的 Jaccard 相似度;任一为空返回 0.0。"""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
 
 
 def normalize_url(url):
@@ -38,18 +68,29 @@ def normalize_url(url):
 
 
 class Deduper:
-    """跨源去重:URL 精确(归一化后)+ 标题 SimHash 近似。线程不安全,单线程用。"""
+    """跨源去重:URL 精确(归一化后)+ 标题 SimHash 近似 + 标题/摘要相似度。
 
-    def __init__(self, threshold=4):
+    相似度阈值 similarity_threshold(默认 0.8):标题或摘要的 token 集合
+    Jaccard 相似度 ≥ 阈值 → 判为重复。设 ≤ 0 关闭。线程不安全,单线程用。
+    """
+
+    def __init__(self, threshold=4, similarity_threshold=0.8):
         self.threshold = threshold
+        self.similarity_threshold = similarity_threshold
         self.seen_urls = set()
         self.seen_hashes = []
+        self.seen_titles = []    # token 集合
+        self.seen_summaries = []  # token 集合
         self.url_dups = 0
         self.simhash_dups = 0
+        self.similarity_dups = 0
         self.last_hash = 0
 
-    def accept(self, url, title):
-        """返回 True 表示该条目首次出现(可通过);否则计数并返回 False。"""
+    def accept(self, url, title, summary=''):
+        """返回 True 表示该条目首次出现(可通过);否则计数并返回 False。
+
+        顺序:URL → SimHash → 相似度(标题或摘要)。summary 为空时跳过摘要相似度。
+        """
         norm = normalize_url(url)
         if not norm or norm in self.seen_urls:
             self.url_dups += 1
@@ -59,6 +100,19 @@ class Deduper:
             if is_similar(th, h, threshold=self.threshold):
                 self.simhash_dups += 1
                 return False
+        if self.similarity_threshold and self.similarity_threshold > 0:
+            t_tok = _tokens(title)
+            s_tok = _tokens(summary)
+            for i, seen_t in enumerate(self.seen_titles):
+                if jaccard_similarity(t_tok, seen_t) >= self.similarity_threshold:
+                    self.similarity_dups += 1
+                    return False
+                if s_tok and self.seen_summaries[i] and \
+                        jaccard_similarity(s_tok, self.seen_summaries[i]) >= self.similarity_threshold:
+                    self.similarity_dups += 1
+                    return False
+            self.seen_titles.append(t_tok)
+            self.seen_summaries.append(s_tok)
         self.seen_urls.add(norm)
         if th:
             self.seen_hashes.append(th)

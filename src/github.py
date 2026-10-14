@@ -123,12 +123,13 @@ class GitHubCollector:
                 seen[full] = self._pick_fields(it, fetched_at)
             time.sleep(self.interval)  # search 30/min,留余量
 
-        # 统一条目:按 stars 降序,跨组去重后取平台上限
+        # 统一条目:按 stars 降序,跨组按 full_name 去重。
+        # 阶段04修复(AIQI-7):不再在采集器内部限量 —— 处理顺序改为
+        # 「规则筛选 → 跨源去重 → 每平台限量」,限量在 run.py 跨源去重之后执行。
         ordered = sorted(seen.values(), key=lambda x: x['stargazers_count'] or 0, reverse=True)
-        ordered = ordered[:self.cap]
         entries = [self._to_entry(f) for f in ordered]
         logging.info(f'[GitHub] {done} 查询成功 / {failed} 失败,'
-                     f'跨组去重 {len(seen)} 个仓库,取 {len(entries)}')
+                     f'跨组去重 {len(seen)} 个仓库(限量将在跨源去重后执行,上限 {self.cap})')
         return entries, {
             'raw_items': len(seen), 'queries_done': done, 'queries_failed': failed,
             'rate_limited': rate_limited, 'cap': self.cap, 'per_query': per_query,
