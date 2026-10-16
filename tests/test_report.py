@@ -10,8 +10,8 @@ import pytest
 
 from conftest import trend_cfg
 
-from src.db import Database
-from src.report import (NO_HOTSPOT_TEXT, build_report, collect_candidates,
+from src.storage.db import Database
+from src.reporting.report import (NO_HOTSPOT_TEXT, build_report, collect_candidates,
                         rule_highlights, validate_report)
 
 RUN_DATE = '2026-10-14'
@@ -284,7 +284,7 @@ def test_section3_empty_summary_notes_reason():
 
 def test_section3_fetch_summary_config_effect(monkeypatch):
     """fetch_summary=true 时对入选条目抓正文首段;false(默认)不抓取只注明理由。"""
-    import src.summarize as summarize
+    import src.summarization.solution_summarizer as summarize
     calls = {'n': 0}
     def fake_fetch(url, cfg):
         calls['n'] += 1

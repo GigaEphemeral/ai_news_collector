@@ -27,9 +27,9 @@ from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config import load_config
-from src.db import Database
-from src.report import build_report, collect_candidates, rule_highlights
+from src.core.config import load_config
+from src.storage.db import Database
+from src.reporting.report import build_report, collect_candidates, rule_highlights
 
 RUN_DATE = date(2026, 10, 14)
 D_PREV = RUN_DATE - timedelta(days=1)

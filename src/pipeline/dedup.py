@@ -6,15 +6,13 @@
   - 标题 SimHash 汉明距离阈值(原有)
   - 标题或摘要 token 集合 Jaccard 相似度 ≥ dedup.similarity_threshold(默认 0.8,八成)
     → 判为重复(新增;阈值可配置,README 已注明)
+
+SimHash 实现来自 vendored lsh_dedup(MIT, © frankzch);阶段02 起包内相对 import。
 """
 import re
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-from .reuse import ensure_reuse_path
-
-ensure_reuse_path()
-
-from lsh_dedup import compute_simhash, is_similar  # noqa: E402
+from ..core.vendor.lsh_dedup import compute_simhash, is_similar
 
 _CJK_RE = re.compile(r'[\u4e00-\u9fff]')
 _WORD_RE = re.compile(r'[a-z0-9]+')

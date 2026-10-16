@@ -22,7 +22,7 @@
 import logging
 from datetime import date, datetime, timedelta
 
-from .db import match_keywords
+from ..storage.db import match_keywords
 
 # 五态常量(输出文案)
 STATE_NEW = '新出现'

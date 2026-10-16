@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """规则过滤单元测试。"""
-from src.filters import ai_relevant, rule_filter
+from src.pipeline.filters import ai_relevant, rule_filter
 
 KEYWORDS = ['ai', 'llm', 'agent', 'rag']
 

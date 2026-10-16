@@ -4,7 +4,8 @@ import json
 import os
 import tempfile
 
-from src.db import Database
+from src.storage.db import Database
+from src.pipeline.topic_stats import compute_topic_stats
 
 
 def _make_db():
@@ -153,7 +154,7 @@ def test_topic_daily_stats_compute():
                    published_at=None, content_hash=9, category='discussion',
                    extra={'points': 500}, source_id=s2,
                    first_seen_at='2026-10-14T01:00:00+00:00')
-    n = db.compute_topic_stats('2026-10-14', ['ai', 'llm', 'agent'], max_topics=3)
+    n = compute_topic_stats(db, '2026-10-14', ['ai', 'llm', 'agent'], max_topics=3)
     assert n >= 3  # ai-agents / llm / agent
     row = db.conn.execute(
         "SELECT * FROM topic_daily_stats WHERE stat_date='2026-10-14' AND topic='llm'"

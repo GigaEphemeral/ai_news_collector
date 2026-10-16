@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """阶段05 日志稳定性:DailyFileHandler 按日滚动(文件名带日期,不 rename,Windows 安全)
-且超过 retention_days 的旧日志会被清理。复用原项目 log_config(只读)。
+且超过 retention_days 的旧日志会被清理。复用 vendored log_config(只读)。
 """
 import glob
 import logging
 import os
 from datetime import datetime as _real_datetime
 
-from src.log import setup_logging
+from src.core.log import setup_logging
+from src.core.vendor import log_config
 
 
 class _Clock:
@@ -37,7 +38,7 @@ def test_daily_log_rotates_on_date_change(monkeypatch, tmp_path):
     assert 'day one message' in open(files_day1[0], encoding='utf-8').read()
 
     # 拨到第二天:同一 logger 继续写,应落到新文件(按日滚动,不 rename)
-    import log_config
+    from src.core.vendor import log_config
     fake = _Clock(lambda tz=None: _real_datetime(2026, 10, 15, 8, 0, 0))
     monkeypatch.setattr(log_config, 'datetime', fake)
     log.info('day two message')
@@ -52,7 +53,7 @@ def test_daily_log_rotates_on_date_change(monkeypatch, tmp_path):
 
 
 def test_retention_cleanup_removes_old_logs(monkeypatch, tmp_path):
-    import log_config
+    from src.core.vendor import log_config
     log_dir = str(tmp_path / 'logs')
     os.makedirs(log_dir, exist_ok=True)
     # 预置一个 100 天前的旧日志与一个近期的日志

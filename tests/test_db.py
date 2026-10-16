@@ -3,7 +3,7 @@
 import os
 import tempfile
 
-from src.db import Database
+from src.storage.db import Database
 
 
 def _make_db():

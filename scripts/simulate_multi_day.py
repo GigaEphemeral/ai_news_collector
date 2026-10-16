@@ -31,9 +31,9 @@ from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config import load_config
-from src.db import Database
-from src.trend import build_trends
+from src.core.config import load_config
+from src.storage.db import Database
+from src.reporting.trend import build_trends
 
 RUN_DATE = date(2026, 10, 14)
 DAYS = [RUN_DATE - timedelta(days=i) for i in range(7, -1, -1)]  # 10-07..10-14

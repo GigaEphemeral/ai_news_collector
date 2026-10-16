@@ -7,8 +7,8 @@ import os
 
 from conftest import trend_cfg
 
-from src.db import Database
-from src.ranking import (github_sort_key, github_eligible, selection_reason,
+from src.storage.db import Database
+from src.pipeline.ranking import (github_sort_key, github_eligible, selection_reason,
                          github_entry_sort_key)
 
 

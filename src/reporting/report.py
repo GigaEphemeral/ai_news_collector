@@ -15,14 +15,15 @@
 原则:栏目允许为空,不为填满版面凑数;每条情报附原文链接;推测与事实分开写
 (证据=事实,来自库;状态标签/观察限制=判断,明确标注)。
 
-本模块零第三方依赖;Ollama 调用在 src/summarize.py,飞书发送在 src/feishu.py。
+本模块零第三方依赖;Ollama 调用在 src/summarization/,飞书发送在 src/reporting/feishu.py。
 """
 import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from .db import utcnow_iso
+from ..storage.db import utcnow_iso
 from .trend import STATE_ORDER  # 固定展示顺序(非评分排序)
+from ..pipeline.tagging import rule_tags
 
 log = logging.getLogger(__name__)
 
@@ -110,9 +111,8 @@ def collect_candidates(db, run_date, cfg, trends=None):
     老项目仅当 24h 增量达阈值)排序,而非 star 总数;排序规则在 config.yaml 的
     report: 段可配置(成员修正版)。
     """
-    from .ranking import github_sort_key
+    from ..pipeline.ranking import github_sort_key
     cfg_r = cfg.get('report', {})
-    young_days = int(cfg_r.get('new_days', cfg.get('trend', {}).get('project', {}).get('young_days', 30)))
     run_date = parse_date(run_date) or datetime.now(timezone.utc).date()
 
     state_map = {}
@@ -153,17 +153,11 @@ def collect_candidates(db, run_date, cfg, trends=None):
                 cand['pushed_days'] = max((run_date - pushed.date()).days, 0)
             cand['topics'] = (extra.get('topics') or [])[:5]
             state = state_map.get(full)
-            if state:
-                cand['tags'].append(state)
-            if cand['created_days'] is not None and cand['created_days'] <= young_days:
-                cand['tags'].append('新项目')
-            if not cand['tags']:
-                cand['tags'].append('GitHub 项目')
+            cand['tags'] = rule_tags(cand, cfg, state=state)
             cand['score'] = cand['stars_24h'] if cand['stars_24h'] is not None else (cand['stars'] or 0)
         elif platform == 'hackernews':
             cand['stars'] = extra.get('points')
-            if cand['stars']:
-                cand['tags'].append(f"HN {cand['stars']} 分")
+            cand['tags'] = rule_tags(cand, cfg)
             cand['score'] = cand['stars'] or 0
             pub = _parse_iso(r['published_at'])
             if pub:
@@ -174,10 +168,7 @@ def collect_candidates(db, run_date, cfg, trends=None):
                 cand['created_days'] = max((run_date - pub.date()).days, 0)
                 cand['score'] = (pub - datetime(run_date.year, run_date.month, run_date.day,
                                                 tzinfo=timezone.utc)).total_seconds()
-            if platform == 'hf_papers':
-                cand['tags'].append('HF 论文')
-            else:
-                cand['tags'].append('官方博客')
+            cand['tags'] = rule_tags(cand, cfg)
         candidates.append(cand)
 
     # 平台内排序:GitHub 按 report.sort_by(默认新生代优先)排序;其他平台按指标降序。
@@ -219,7 +210,7 @@ def rule_highlights(candidates, cfg):
       - 非 GitHub:各平台指标最高者补位。
       每条上榜理由来自库中真实字段(ranking.selection_reason),可解释。
     """
-    from .ranking import github_eligible, github_sort_key, selection_reason
+    from ..pipeline.ranking import github_eligible, github_sort_key, selection_reason
     cfg_r = cfg.get('report', {})
     max_h = int(cfg_r.get('max_highlights', 3))
     has_delta = _has_delta_data(candidates)
@@ -248,7 +239,7 @@ def rule_highlights(candidates, cfg):
 def _enrich_facts(highlights, candidates, cfg):
     """Ollama 摘要条目缺事实串时补上;上榜理由一律改用库中真实字段(成员要求:
     不用模型编造的模糊话术,上榜理由必须可解释)。"""
-    from .ranking import selection_reason
+    from ..pipeline.ranking import selection_reason
     cfg_r = cfg.get('report', {})
     has_delta = _has_delta_data(candidates)
     by_name = {c['name']: c for c in candidates}
@@ -281,7 +272,7 @@ def _section1(highlights):
 
 def _section2(candidates, cfg_r):
     """二、开源项目与工程实践(GitHub 项目;阶段04修复:按 report.sort_by 新生代优先)。"""
-    from .ranking import github_sort_key
+    from ..pipeline.ranking import github_sort_key
     gh = [c for c in candidates if c['platform'] == 'github']
     gh.sort(key=lambda c: github_sort_key(c, cfg_r))
     gh = gh[:int(cfg_r.get('opensource_max', 5))]
@@ -556,7 +547,7 @@ def _build_resume_map(candidates, cfg):
     if not sol:
         return {}
     try:
-        from .summarize import build_solution_resumes
+        from ..summarization.solution_summarizer import build_solution_resumes
         return build_solution_resumes(sol, cfg)
     except Exception as e:
         log.warning(f'解决方案摘要生成失败,回退到库中 summary: {e}')

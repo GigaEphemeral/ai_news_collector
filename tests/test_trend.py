@@ -4,7 +4,7 @@
 import json
 from datetime import date
 
-from src.trend import (repo_trend, topic_trend, build_trends,
+from src.reporting.trend import (repo_trend, topic_trend, build_trends,
                        STATE_NEW, STATE_WARMING, STATE_SURGE,
                        STATE_MATURE, STATE_DECLINE)
 from conftest import trend_cfg

@@ -8,8 +8,9 @@ import requests
 
 from conftest import trend_cfg
 
-from src.report import collect_candidates
-from src.summarize import (build_compact, call_ollama, parse_and_validate,
+from src.reporting.report import collect_candidates
+from src.summarization.ollama_client import build_compact
+from src.summarization.news_summarizer import (call_news_ollama as call_ollama, parse_and_validate,
                            summarize_or_fallback)
 
 

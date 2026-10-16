@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """飞书自定义机器人发送(阶段04)。
 
-- webhook 只从环境变量 FEISHU_WEBHOOK_URL 读取(.env,定位规则见 src/config.py);
+- webhook 只从环境变量 FEISHU_WEBHOOK_URL 读取(.env,定位规则见 src/core/config.py);
   **严禁打印 / 写日志 / 入库**——本模块所有错误信息都会把 webhook 脱敏为
   '<redacted>',调用方拿到的异常文本同样不含 URL。
 - 幂等:发送前查 daily_reports 当日 sent_status == 'sent' → 跳过,不重复发送;

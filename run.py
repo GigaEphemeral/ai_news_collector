@@ -33,15 +33,16 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.config import load_config
-from src.log import setup_logging
-from src.db import Database, utcnow_iso
-from src.github import GitHubCollector
-from src.hackernews import HackerNewsCollector
-from src.rss import fetch_rss_and_hf
-from src.filters import rule_filter
-from src.dedup import Deduper
-from src.trend import build_trends
+from src.core.config import load_config
+from src.core.log import setup_logging
+from src.storage.db import Database, utcnow_iso
+from src.collectors.github import GitHubCollector
+from src.collectors.hackernews import HackerNewsCollector
+from src.collectors.rss import fetch_rss_and_hf
+from src.pipeline.filters import rule_filter
+from src.pipeline.dedup import Deduper
+from src.pipeline.topic_stats import compute_topic_stats
+from src.reporting.trend import build_trends
 
 
 def parse_args():
@@ -103,7 +104,7 @@ def main():
             print('[FAIL] --send 需要 SQLite(去掉 --no-db 或指定 --db)')
             sys.exit(1)
         try:
-            from src.feishu import send_report
+            from src.reporting.feishu import send_report
             result = send_report(db, run_date, cfg)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             ok = result['status'] in ('sent', 'skipped_already_sent')
@@ -245,7 +246,7 @@ def main():
     for platform in ('github', 'hackernews', 'rss', 'hf_papers'):
         items = [it for it in deduped if it['platform'] == platform]
         if platform == 'github' and items:
-            from src.ranking import github_entry_sort_key
+            from src.pipeline.ranking import github_entry_sort_key
             cfg_r = cfg.get('report', {})
             items.sort(key=lambda it: github_entry_sort_key(it, cfg_r, run_date, db))
         # 非 GitHub 平台保持各自采集器/规则过滤后的顺序(热度/时间),只截断
@@ -308,8 +309,8 @@ def main():
                 snap_written += 1
             db_stats['snapshots_written'] = snap_written
             # 4) topic_daily_stats:当天首次出现条目按主题汇总
-            db_stats['topics_written'] = db.compute_topic_stats(
-                run_date, cfg['keywords']['ai'],
+            db_stats['topics_written'] = compute_topic_stats(
+                db, run_date, cfg['keywords']['ai'],
                 max_topics=cfg.get('topics', {}).get('max_per_item', 3),
             )
             # 5) 趋势引擎(纯规则)
@@ -337,7 +338,7 @@ def main():
                 print(f'[FAIL] 日报生成失败: {e}')
         if args.send and args.report:
             try:
-                from src.feishu import send_report
+                from src.reporting.feishu import send_report
                 send_result = send_report(db, run_date, cfg)
                 stats['report']['send'] = send_result
                 print(f"[飞书] 发送结果: {json.dumps(send_result, ensure_ascii=False)}")
@@ -409,8 +410,8 @@ def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
 
     返回 build_report() 的 dict(含 body / validation / highlights / model_meta)。
     """
-    from src.report import build_report, collect_candidates, rule_highlights
-    from src.summarize import summarize_or_fallback
+    from src.reporting.report import build_report, collect_candidates, rule_highlights
+    from src.summarization.news_summarizer import summarize_or_fallback
 
     candidates = collect_candidates(db, run_date, cfg, trends)
     if no_summarize or not cfg.get('ollama', {}).get('enabled', True):

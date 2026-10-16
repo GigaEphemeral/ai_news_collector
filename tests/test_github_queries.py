@@ -2,7 +2,7 @@
 """GitHub 查询模板渲染测试(不联网):日期动态计算 + 每组 ≤10 + 字段裁剪。"""
 from datetime import datetime, timedelta, timezone
 
-from src.github import GitHubCollector
+from src.collectors.github import GitHubCollector
 
 
 def test_query_templates_render():

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """去重单元测试:URL 归一化 + SimHash。"""
-from src.dedup import Deduper, normalize_url
+from src.pipeline.dedup import Deduper, normalize_url
 
 
 def test_normalize_url_strips_tracking():
@@ -84,7 +84,7 @@ def test_deduper_similarity_chinese_duplicate():
 
 
 def test_jaccard_similarity_basic():
-    from src.dedup import jaccard_similarity, _tokens
+    from src.pipeline.dedup import jaccard_similarity, _tokens
     a, b = _tokens('hello world'), _tokens('hello world again')
     assert abs(jaccard_similarity(a, b) - 2 / 3) < 1e-9
     assert jaccard_similarity(set(), set()) == 0.0

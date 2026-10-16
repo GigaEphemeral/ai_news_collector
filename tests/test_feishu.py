@@ -6,8 +6,8 @@ import sys
 import pytest
 import requests
 
-from src.db import Database
-from src.feishu import FeishuError, load_webhook, send_report
+from src.storage.db import Database
+from src.reporting.feishu import FeishuError, load_webhook, send_report
 
 RUN_DATE = '2026-10-14'
 WEBHOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/test-only'

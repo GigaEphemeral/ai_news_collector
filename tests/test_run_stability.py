@@ -19,8 +19,8 @@ import yaml
 
 import run as run_module
 from conftest import trend_cfg
-from src.github import GitHubCollector
-from src.hackernews import HackerNewsCollector
+from src.collectors.github import GitHubCollector
+from src.collectors.hackernews import HackerNewsCollector
 
 RUN_DATE = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
@@ -164,7 +164,7 @@ def _read_out_json(cfg_path, run_date):
 
 
 def _run_db(cfg_path):
-    from src.db import Database
+    from src.storage.db import Database
     tmp = os.path.dirname(cfg_path)
     return Database(os.path.join(tmp, 'data', 'test.sqlite3'))
 
@@ -198,7 +198,7 @@ class TestOffline:
         assert 'github:search' in src_errs
         assert 'hackernews:topstories' in src_errs
         # 真实 feed 列表时,每个 feed 也有 last_error
-        from src.config import load_config
+        from src.core.config import load_config
         cfg = load_config(cfg_path)
         for s in cfg['rss']['sources']:
             assert s['url'] in src_errs, f'{s["name"]} 应记录 last_error'

@@ -42,19 +42,36 @@ ai-news-mvp/
     simulate_multi_day.py   # 多日连续运行模拟(受控合成数据,演示 8 天趋势对比)
     demo_report_aiqi7.py    # 日报生成演示(合成数据,验证排序/摘要/分段统计)
   src/
-    config.py               # config.yaml + .env 加载
-    github.py               # GitHub Search API(3 组查询模板,日期动态计算)
-    hackernews.py           # HN 官方 Firebase API(topstories + 规则过滤)
-    rss.py                  # 复用原项目 rss_fetcher;超大 feed 早期截断
-    filters.py              # 规则过滤(字段完整/时间窗口/关键词,无评分)
-    dedup.py                # URL 归一化 + 标题 SimHash + 标题/摘要相似度(阈值可配置)
-    ranking.py              # GitHub 候选排序与上榜理由(新生代优先,纯规则不评分)
-    db.py                   # SQLite 全表 + FTS5 + 快照/主题统计/运行记录/日报状态
-    trend.py                # 规则趋势引擎(五态 + 24h/7d/30d + 证据)
-    report.py               # 日报模板(固定栏目/关键词/长度校验/规则降级选择/解决方案摘要)
-    summarize.py            # 可选 Ollama 摘要 + 解决方案一行摘要(fetch_summary)
-    feishu.py               # 飞书发送(webhook 脱敏/幂等/退避重试/结果不确定停止)
-    log.py / reuse.py       # 日志与复用路径挂载
+    core/                 # 配置/日志/vendored 复用(src/core/vendor/)
+      config.py           # config.yaml + .env 加载
+      log.py              # 按日滚动日志(DailyFileHandler,vendored log_config)
+      vendor/             # vendored ai-news-brief(MIT,© frankzch,commit 3b3e182)
+        rss_fetcher.py    # 原 RSSFetcher(HF daily papers / 多策略抓取)
+        lsh_dedup.py      # SimHash 去重
+        log_config.py     # DailyFileHandler(按日滚动)
+        fetch_stats.py    # 抓取统计(当前未直接使用)
+        content_processor.py / config_loader.py   # 上述模块的依赖
+    collectors/           # 采集器
+      github.py           # GitHub Search API(3 组查询模板,日期动态计算)
+      hackernews.py       # HN 官方 Firebase API(topstories + 规则过滤)
+      rss.py              # RSS 博客 / HF Daily Papers(vendored rss_fetcher + 早期截断)
+    pipeline/             # 规则管线
+      filters.py          # 规则过滤(字段完整/时间窗口/关键词,无评分)
+      dedup.py            # URL 归一化 + 标题 SimHash + 标题/摘要相似度(阈值可配置)
+      ranking.py          # GitHub 候选排序与上榜理由(新生代优先,纯规则不评分)
+      tagging.py          # 候选规则标签(平台/热度/趋势状态)
+      topic_stats.py      # 主题日统计(compute_topic_stats)
+    storage/              # 存储
+      schema.py           # SQLite 表结构 + FTS5(ensure_schema)
+      db.py               # Database 类(快照/主题统计/运行记录/日报状态)
+    summarization/        # 摘要
+      ollama_client.py    # Ollama /api/chat 客户端 + 输入精简
+      news_summarizer.py  # 「今日值得关注」摘要 + 降级
+      solution_summarizer.py  # 「解决方案」一行摘要(fetch_summary)
+    reporting/            # 日报
+      trend.py            # 规则趋势引擎(五态 + 24h/7d/30d + 证据)
+      report.py           # 日报模板(固定栏目/关键词/长度校验/规则降级选择/解决方案摘要)
+      feishu.py           # 飞书发送(webhook 脱敏/幂等/退避重试/结果不确定停止)
   tests/                    # pytest 单元测试(119 个)
 ```
 
@@ -83,7 +100,7 @@ ai-news-mvp/
 - **限量发生在去重之后**:采集器内部不再限量,先统一跨源去重再按每平台上限截断,避免跨源重复内容各自占掉限量名额。
 - **每平台上限** `per_platform_cap: 10`:只是上限,允许不足 10 条。
 - **趋势**(`src/trend.py`):对项目(基于快照)与主题(基于日统计)输出五态,见下节。
-- **摘要**(`src/summarize.py`):可选,只对入选「今日值得关注」的 Top 8 候选调 Ollama;失败自动降级为规则标签。
+- **摘要**(`src/summarization/`):可选,只对入选「今日值得关注」的 Top 8 候选调 Ollama;失败自动降级为规则标签。
 - **日报**(`src/report.py`):固定五栏目模板 + 长度/关键词校验 + 幂等发送。
 
 ## 配置
@@ -209,7 +226,7 @@ ai-news-mvp/
 
 ## 依赖与约束
 
-- **复用来源**:按审计报告复用原项目 [`frankzch/ai-news-brief`](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`,只读不改动):`rss_fetcher`(HF daily papers / parse_feed)、`lsh_dedup`、`log_config`(可选 `content_processor` / `fetch_stats`)。原项目 src 默认取项目根同级的 `ai-news-brief/src`,可用环境变量 `AI_NEWS_BRIEF_SRC` 覆盖(例如从 git 仓库副本运行时)。
+- **复用来源**:复用原项目 [`frankzch/ai-news-brief`](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`)的 `rss_fetcher`(HF daily papers / parse_feed)、`lsh_dedup`、`log_config`、`content_processor` 等,已 **vendoring** 到 `src/core/vendor/`(逐字拷贝,仅改包内相对 import,保留版权头与 LICENSE);仓库自包含,不依赖外部 `ai-news-brief` 目录。
 - **Python 版本**:开发环境实测 3.14.4;无锁死版本,`requirements.txt` 为下限约束。
 - **依赖清单**(全部轻量,无重依赖):`requests`、`httpx[socks]`、`feedparser`、`curl_cffi`、`simhash`、`pyyaml`、`python-dotenv`、`beautifulsoup4`、`trafilatura`。
 - **约束**:不安装 torch / playwright / psycopg2 / PostgreSQL;不引入 Redis/Kafka/向量库/复杂多智能体架构;模型调用可选(默认规则优先)。
@@ -272,7 +289,7 @@ FTS 查询:`MATCH 'llm OR agent'` 语法,按 bm25 排序。
 - **长度与关键词校验**:`validate_report()` 检查「每日ai情报」关键词与 `report.max_chars`(6000),超长自动裁剪。
 - **生成与发送分离**:`build_report()` 只写 `daily_reports`;`run.py --send` 从库重发,不重新抓取。
 
-### 可选 Ollama 摘要(src/summarize.py)
+### 可选 Ollama 摘要(src/summarization/news_summarizer.py)
 
 - 只对入选 Top `report.highlights_cap`(8)调用 `ollama.base_url` 的 `ollama.model`(Qwen3.5:9B);
 - 输入精简 JSON:`name/description/stars/stars_24h/created_days/topics`(description ≤120 字符、topics ≤5),不传 API 原始 JSON;
@@ -280,7 +297,7 @@ FTS 查询:`MATCH 'llm OR agent'` 语法,按 bm25 排序。
 - 输出 3-5 条,经代码校验:项目名必须与输入匹配、URL 取输入规范化值(防编造链接)、简介/依据非空;
 - 超时/不可达/输出非法 → **降级**:原标题 + 规则标签,不阻塞日报、不反复重试(单次调用)。
 
-### 飞书发送(src/feishu.py)
+### 飞书发送(src/reporting/feishu.py)
 
 - webhook 只从 `.env` 的 `FEISHU_WEBHOOK_URL` 读取;**严禁打印/外泄**:所有日志、异常文本、`daily_reports.last_error` 都把 webhook 脱敏为 `<redacted>`;
 - **幂等**:发送前查 `daily_reports.sent_status == 'sent'` → 跳过;只有飞书确认成功(`code=0`)才置 `sent`;
@@ -328,7 +345,7 @@ multica autopilot trigger-delete <autopilot-id> <trigger-id>
 multica autopilot trigger-add <autopilot-id> --kind schedule --cron "0 8 * * *" --timezone Asia/Shanghai
 ```
 
-autopilot 每日触发的实际命令为 `run.py --since-days 7`(采集)与 `run.py --report --send`(日报发送);`.env` 由 `src/config.py` 自动加载,无需手动 source。程序幂等,重复跑安全。
+autopilot 每日触发的实际命令为 `run.py --since-days 7`(采集)与 `run.py --report --send`(日报发送);`.env` 由 `src/core/config.py` 自动加载,无需手动 source。程序幂等,重复跑安全。
 
 本项目已配置两个 autopilot(2026-10-14 创建,配置正确,次日生效,无需重复创建):
 
@@ -377,7 +394,7 @@ crontab -e
 - **飞书不可达**:日报已存在 `daily_reports`(sent_status=failed),恢复后 `run.py --send --date YYYY-MM-DD` 从库重发,不重新采集;已 `sent` 不会重复发送。
 - **发送结果不确定(超时)**:置 `uncertain` 停止重发,避免重复推送;人工确认后可重新 `--send`。
 - **限流**:GitHub 403/429 不硬闯,记录并跳过该查询;HN 单条失败只计数。
-- **复用路径缺失**:设 `AI_NEWS_BRIEF_SRC` 指向原项目 `ai-news-brief/src` 目录。
+- **vendored 路径**:复用模块已在 `src/core/vendor/`(MIT © frankzch),仓库自包含,不依赖外部目录。
 - **想要重置库**:删除 `../../data/ai_news_mvp.sqlite3` 后重跑即可(自动建表)。
 
 ## 开发与运行统计(复盘用)
@@ -388,7 +405,7 @@ crontab -e
 
 - **Python 版本**:3.14.4(开发环境虚拟环境实测;无锁死版本,`requirements.txt` 为下限约束)。
 - **关键依赖**:`requests`、`httpx[socks]`、`feedparser`、`curl_cffi`、`simhash`、`pyyaml`、`python-dotenv`、`beautifulsoup4`、`trafilatura`。
-- **复用来源**:[frankzch/ai-news-brief](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`,只读不改动):`rss_fetcher`、`lsh_dedup`、`log_config`(可选 `content_processor` / `fetch_stats`)。
+- **复用来源**:[frankzch/ai-news-brief](https://github.com/frankzch/ai-news-brief)(MIT,commit `3b3e182`)的 `rss_fetcher`、`lsh_dedup`、`log_config`、`content_processor` 已 vendoring 到 `src/core/vendor/`(阶段02 起仓库自包含)。
 - **开发 agent 模型**:deepseek-v4-flash(平台编码 agent)。
 
 ### 模型使用

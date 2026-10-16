@@ -1,19 +1,8 @@
 # -*- coding: utf-8 -*-
-"""SQLite 历史库:阶段03 完整表结构 + FTS5 全文检索。
+"""SQLite 历史库:阶段03 完整表结构 + FTS5 全文检索(阶段02 按领域归入 storage)。
 
-阶段02 仅有 sources / items 两张表;阶段03 补齐(表结构按阶段01审计报告 E.2、
-方案文档第五节):
-  - sources          来源配置(阶段02 已有,保持不变)
-  - items            情报条目(阶段02 已有,保持不变)
-  - item_sources     同一事件被多个来源发现的跨源映射
-  - project_snapshots GitHub 项目每日快照(star_snapshots 思路并入,PK=repo+date)
-  - topic_daily_stats 每天每主题条目数/来源数/代表情报
-  - runs             每次运行的开始/结束/状态/错误
-  - daily_reports    日报与发送状态(阶段04 使用,本阶段建表)
-  - items_fts        FTS5 external-content 虚拟表 + 触发器(items_ai/items_ad/items_au)
-
-对已存在的阶段02 数据库自动迁移:新表用 CREATE TABLE IF NOT EXISTS;items_fts
-在连接时对存量 items 执行 rebuild,保证旧数据可检索。
+表结构/迁移/FTS5 初始化拆到同目录 schema.py(ensure_schema),本模块只保留
+Database 类的方法;主题日统计 compute_topic_stats 搬至 pipeline/topic_stats.py。
 """
 import json
 import logging
@@ -21,107 +10,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sources (
-  id INTEGER PRIMARY KEY,
-  url TEXT UNIQUE NOT NULL,
-  name TEXT NOT NULL,
-  category TEXT,
-  enabled INTEGER DEFAULT 1,
-  last_fetch_at TEXT,
-  last_error TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS items (
-  id INTEGER PRIMARY KEY,
-  source_id INTEGER REFERENCES sources(id),
-  platform TEXT,
-  title TEXT NOT NULL,
-  url TEXT UNIQUE NOT NULL,
-  summary TEXT,
-  published_at TEXT,
-  content_hash INTEGER,
-  category TEXT,
-  extra TEXT,
-  first_seen_at TEXT,
-  last_seen_at TEXT
-);
-CREATE TABLE IF NOT EXISTS item_sources (
-  item_id INTEGER REFERENCES items(id) ON DELETE CASCADE,
-  source_id INTEGER REFERENCES sources(id),
-  source_url TEXT,
-  seen_at TEXT,
-  PRIMARY KEY (item_id, source_id)
-);
-CREATE TABLE IF NOT EXISTS project_snapshots (
-  repo TEXT NOT NULL,
-  date TEXT NOT NULL,
-  stars INTEGER,
-  forks INTEGER,
-  pushed_at TEXT,
-  created_at TEXT,
-  description TEXT,
-  language TEXT,
-  topics TEXT,                 -- JSON 数组(≤5)
-  fetched_at TEXT,
-  PRIMARY KEY (repo, date)
-);
-CREATE TABLE IF NOT EXISTS topic_daily_stats (
-  stat_date TEXT NOT NULL,
-  topic TEXT NOT NULL,
-  count INTEGER DEFAULT 0,
-  source_count INTEGER DEFAULT 0,
-  representative_item_id INTEGER,
-  PRIMARY KEY (stat_date, topic)
-);
-CREATE TABLE IF NOT EXISTS runs (
-  id INTEGER PRIMARY KEY,
-  run_date TEXT,
-  started_at TEXT,
-  finished_at TEXT,
-  status TEXT,                 -- running / ok / partial / failed
-  per_source_stats TEXT,       -- JSON
-  errors TEXT,                 -- JSON
-  items_inserted INTEGER DEFAULT 0,
-  items_updated INTEGER DEFAULT 0,
-  trends TEXT                  -- JSON(趋势输出)
-);
-CREATE TABLE IF NOT EXISTS daily_reports (
-  report_date TEXT PRIMARY KEY,
-  body TEXT,
-  generated_at TEXT,
-  sent_status TEXT DEFAULT 'pending',
-  sent_at TEXT,
-  retry_count INTEGER DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_items_platform ON items(platform);
-CREATE INDEX IF NOT EXISTS idx_items_published_at ON items(published_at);
-CREATE INDEX IF NOT EXISTS idx_items_first_seen ON items(first_seen_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_date ON project_snapshots(date);
-CREATE INDEX IF NOT EXISTS idx_snapshots_repo ON project_snapshots(repo);
-CREATE INDEX IF NOT EXISTS idx_topic_stats_topic ON topic_daily_stats(topic);
-CREATE INDEX IF NOT EXISTS idx_topic_stats_date ON topic_daily_stats(stat_date);
-CREATE INDEX IF NOT EXISTS idx_item_sources_item ON item_sources(item_id);
-"""
-
-# FTS5 external-content 表:索引 items 的 title/summary,触发器保持同步
-FTS_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-  title, summary, content=items, content_rowid=id
-);
-CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
-  INSERT INTO items_fts(rowid, title, summary) VALUES (new.id, new.title, new.summary);
-END;
-CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
-  INSERT INTO items_fts(items_fts, rowid, title, summary)
-  VALUES ('delete', old.id, old.title, old.summary);
-END;
-CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
-  INSERT INTO items_fts(items_fts, rowid, title, summary)
-  VALUES ('delete', old.id, old.title, old.summary);
-  INSERT INTO items_fts(rowid, title, summary) VALUES (new.id, new.title, new.summary);
-END;
-"""
+from .schema import ensure_schema
 
 
 def utcnow_iso():
@@ -144,31 +33,8 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.execute('PRAGMA foreign_keys=ON')
-        self.conn.executescript(SCHEMA)
-        self._migrate_daily_reports()
-        self.fts_available = False
-        try:
-            self.conn.executescript(FTS_SCHEMA)
-            # 存量 items 需要一次 rebuild 才进入索引(审计实测:external-content + 触发器可用)
-            n_items = self.conn.execute('SELECT count(*) FROM items').fetchone()[0]
-            if n_items:
-                self.conn.execute("INSERT INTO items_fts(items_fts) VALUES ('rebuild')")
-            self.conn.commit()
-            self.fts_available = True
-        except sqlite3.OperationalError as e:
-            logging.error(f'FTS5 不可用,全文检索降级: {e}')
-            self.conn.rollback()
-        self.conn.commit()
+        self.fts_available = ensure_schema(self.conn)
         logging.info(f'SQLite 就绪: {db_path}(FTS5={"可用" if self.fts_available else "降级"})')
-
-    def _migrate_daily_reports(self):
-        """阶段04:给已存在的 daily_reports 表补 last_error 列(旧库无此列)。"""
-        for ddl in ('ALTER TABLE daily_reports ADD COLUMN last_error TEXT',):
-            try:
-                self.conn.execute(ddl)
-            except sqlite3.OperationalError:
-                pass  # 列已存在
-        self.conn.commit()
 
     # ---------- daily_reports(阶段04:日报正文 + 发送状态) ----------
     def get_daily_report(self, report_date):
@@ -352,43 +218,6 @@ class Database:
             (stat_date, topic, count, source_count, representative_item_id),
         )
         self.conn.commit()
-
-    def compute_topic_stats(self, stat_date, keywords, max_topics=3):
-        """按日期汇总主题统计(条目数/来源数/代表情报)。
-
-        计数口径:items.first_seen_at 落在 stat_date 当天首次出现的条目。
-        主题来源:
-          - GitHub:   extra.topics(取前 max_topics,无 topics 归入 opensource)
-          - 其他平台: 标题/摘要命中关键词;无命中归入 category/platform。
-        代表情报 = 该主题当天互动最高条目(Star/Pointer 最高,平手取最小 id)。
-        返回写入的主题数。
-        """
-        rows = self.conn.execute(
-            'SELECT * FROM items WHERE date(first_seen_at)=?',
-            (stat_date,)).fetchall()
-        agg = {}
-        for r in rows:
-            extra = {}
-            try:
-                extra = json.loads(r['extra'] or '{}')
-            except (ValueError, TypeError):
-                pass
-            if r['platform'] == 'github':
-                topics = (extra.get('topics') or [])[:max_topics] or ['opensource']
-            else:
-                topics = match_keywords(f"{r['title']} {r['summary'] or ''}", keywords)
-                topics = topics[:max_topics] or [r['category'] or r['platform']]
-            score = extra.get('stars') or extra.get('points') or 0
-            for t in topics:
-                a = agg.setdefault(t, {'count': 0, 'sources': set(), 'score': -1, 'rep': None})
-                a['count'] += 1
-                a['sources'].add(r['platform'])
-                if score > a['score'] or (score == a['score'] and
-                                          (a['rep'] is None or r['id'] < a['rep'])):
-                    a['score'], a['rep'] = score, r['id']
-        for t, a in agg.items():
-            self.upsert_topic_stat(stat_date, t, a['count'], len(a['sources']), a['rep'])
-        return len(agg)
 
     def topic_stat_rows(self, topic):
         """某主题全部日统计,按 stat_date 升序。"""

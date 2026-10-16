@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """RSS 博客 / Hugging Face Daily Papers 采集器。
 
-复用原项目 ai-news-brief/src/rss_fetcher.py(MIT,© frankzch,commit 3b3e182):
+复用 vendored rss_fetcher(原 ai-news-brief/src/rss_fetcher.py,MIT,© frankzch,
+commit 3b3e182,拷入 src/core/vendor/):
   - HF Daily Papers:直接调用原 RSSFetcher._fetch_hf_daily_papers(逐字复用,
     按 upvotes+stars 双排名保留 top N,只留带 GitHub 仓库的论文)。
   - 普通 RSS:抓取+解析逻辑与原 parse_feed 的 RSS 分支一致(改编),新增超大 feed
@@ -19,11 +20,7 @@ from datetime import datetime, timezone
 
 import feedparser
 
-from .reuse import ensure_reuse_path
-
-ensure_reuse_path()
-
-from rss_fetcher import RSSFetcher  # noqa: E402
+from ..core.vendor.rss_fetcher import RSSFetcher  # vendored(阶段02:不再走 sys.path)
 
 
 def truncate_feed_content(content: bytes, max_entries: int = 30) -> bytes:

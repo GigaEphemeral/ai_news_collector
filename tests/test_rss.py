@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """RSS 超大 feed 早期截断单元测试。"""
-from src.rss import truncate_feed_content
+from src.collectors.rss import truncate_feed_content
 
 
 def _feed(items=10):
