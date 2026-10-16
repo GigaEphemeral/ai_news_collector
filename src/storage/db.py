@@ -347,6 +347,16 @@ class Database:
             'SELECT DISTINCT topic FROM topic_daily_stats WHERE stat_date=? ORDER BY topic',
             (date,)).fetchall()]
 
+    def item_title_url(self, item_id):
+        """某条目的标题与 url(主题趋势代表条目用);不存在返回 (None, None)。"""
+        if item_id is None:
+            return None, None
+        row = self.conn.execute(
+            'SELECT title, url FROM items WHERE id=?', (item_id,)).fetchone()
+        if row is None:
+            return None, None
+        return row['title'], row['url']
+
     # ---------- runs ----------
     def start_run(self, run_date, started_at=None):
         cur = self.conn.execute(

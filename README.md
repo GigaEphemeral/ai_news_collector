@@ -167,7 +167,7 @@ flowchart LR
 
 **④ 入库与跨源归并**(`storage/db.py upsert_item`):`items` 唯一键 `UNIQUE(platform, native_id)`。各源自然键:GitHub `full_name` / HN `hn_id` / RSS `(source_id, guid)`(无 guid 回退归一化 url)/ HF `arxiv_id`(回退 url)。入库顺序:先按自然键精确匹配 → 未命中再按内容指纹 `canonical_key`(标题归一化 SimHash)近 7 天窗口模糊匹配(阈值 4)→ 命中则**合并**:新来源挂 `item_sources`,标题/摘要择优,`first_seen_at` 保留最早,不拒绝;近似标题(指纹距离 > 4)不误并。
 
-**⑤ 趋势引擎**(`reporting/trend.py`,纯规则不评分):基于 `project_snapshots`(项目)与 `topic_daily_stats`(主题),输出五态(新出现/持续升温/突然增长/进入成熟期/热度回落),三个时间尺度 24h/7d/30d,窗口不足明确标注「窗口不足」;每个结论带证据(来源表名+数字+时间窗),禁止编造;首次运行只建基线。
+**⑤ 趋势引擎**(`reporting/trend.py`,纯规则不评分):基于 `project_snapshots`(项目)与 `topic_daily_stats`(主题),输出五态(新出现/持续升温/突然增长/进入成熟期/热度回落),三个时间尺度 24h/7d/30d,窗口不足明确标注「窗口不足」;每个结论带证据(来源表名+数字+时间窗),禁止编造;首次运行只建基线。主题趋势每条附**代表条目(标题+url)**作为来源;GitHub 主题只取命中 AI 关键词的仓库标签,非 AI 标签(acme/backend/email 等)不污染趋势(阶段05修复)。
 
 **⑥ 日报候选与排名**(`pipeline/ranking.py` + `reporting/report.py collect_candidates`,纯规则不评分):
 - GitHub:按 `report.sort_by`(`freshness` 默认:新生代创建 ≤ `new_days` 优先,老项目仅当 24h 增量 ≥ `old_repo_min_delta_24h` 或增长率 ≥ `old_repo_min_growth_pct` 才上榜;`growth`/`stars` 可选)。
@@ -273,7 +273,7 @@ export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env
 | `dedup.simhash_threshold` | 4 | 标题 SimHash 汉明距离阈值(越小越严格) |
 | `dedup.similarity_threshold` | 0.8 | Jaccard 相似度 ≥ 该值判重(≤0 关闭) |
 | `keywords.ai` | 24 词 | 规则初筛关键词(仅 HN/RSS/HF) |
-| `topics.max_per_item` | 3 | 每条目最多主题数(GitHub 取 extra.topics 前 N) |
+| `topics.max_per_item` | 3 | 每条目最多主题数(GitHub 仅保留命中 `keywords.ai` 的标签,无命中归入 opensource) |
 | `limits.per_platform_cap` | 10 | 每平台每日候选上限(硬性约束) |
 
 ### trend(趋势阈值)

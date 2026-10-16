@@ -432,6 +432,12 @@ def build_trends(db, run_date, cfg, ai_keywords, limit_projects=20, limit_topics
         t = topic_trend(topic, rows, run_date, cfg)
         if first_topic_day:
             t['confidence'] = '初步判断'
+        # 阶段05修复:主题趋势附代表条目(标题+url)作为来源证据,避免"只有计数无出处"
+        rep_id = rows[-1]['representative_item_id'] if rows else None
+        title, url = db.item_title_url(rep_id)
+        if title:
+            t['evidence'].append(f'代表条目:{title}({url or "无链接"})')
+            t['representative'] = {'title': title, 'url': url}
         topics.append(t)
         if len(topics) >= limit_topics:
             break
