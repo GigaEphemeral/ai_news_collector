@@ -14,6 +14,7 @@ commit 3b3e182,拷入 src/core/vendor/):
 """
 import concurrent.futures
 import logging
+import re
 import time
 from calendar import timegm
 from datetime import datetime, timezone
@@ -103,6 +104,7 @@ class MVPFeedFetcher(RSSFetcher):
     # ---- 条目构建(与原 parse_feed 的 RSS 分支一致) ----
     @staticmethod
     def _build_entries(content, feed_config):
+        """阶段03:补采 guid(id),作为 RSS 自然键 (source_id, guid)。"""
         parsed = feedparser.parse(content)
         entries = []
         for entry in parsed.entries:
@@ -119,6 +121,7 @@ class MVPFeedFetcher(RSSFetcher):
             entries.append({
                 'title': entry.get('title', ''),
                 'url': entry.get('link', ''),
+                'guid': entry.get('guid') or entry.get('id') or '',  # 阶段03:自然键来源
                 'summary': summary[:500],
                 'source': feed_config.get('name', ''),
                 'published_at': published_at,
@@ -141,6 +144,26 @@ class MVPFeedFetcher(RSSFetcher):
             logging.error(f'[RSS] {name} 失败: {e}')
             return {'entries': [], 'error': 'rss_fetch_error',
                     'error_detail': str(e), 'feed_config': feed_config}
+
+
+def _normalized_url(url):
+    """native_id 回退用:归一化 url(小写、去尾斜杠)。"""
+    return (url or '').strip().rstrip('/').lower()
+
+
+def _native_id_for(feed_config, entry):
+    """阶段03 自然键:RSS = (source_id, guid)(无 guid 回退归一化 url);
+    HF = arxiv_id(从 huggingface.co/papers/{id} 提取,回退归一化 url)。"""
+    if feed_config.get('category') == 'papers':
+        url = entry.get('url') or entry.get('link') or ''
+        m = re.search(r'/papers/([^/?]+)', url)
+        if m:
+            return m.group(1)
+        return _normalized_url(url)
+    guid = (entry.get('guid') or '').strip()
+    if guid:
+        return f"{feed_config.get('id', '')}:{guid}"
+    return _normalized_url(entry.get('url') or '')
 
 
 def fetch_rss_and_hf(cfg):
@@ -186,6 +209,10 @@ def fetch_rss_and_hf(cfg):
                     e['_source_name'] = fc['name']
                     e['category'] = fc.get('category', 'news')
                     e['platform'] = 'hf_papers' if fc['category'] == 'papers' else 'rss'
+                    # 阶段03: 自然键
+                    #   RSS: (source_id, guid),无 guid 回退归一化 url
+                    #   HF : arxiv_id(从 huggingface.co/papers/{id} 提取),回退 url
+                    e['native_id'] = _native_id_for(fc, e)
                     entries.append(e)
                 results[fc['name']] = entries
             except Exception as exc:

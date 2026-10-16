@@ -55,6 +55,7 @@ class HackerNewsCollector:
                 entries.append({
                     'title': title,
                     'url': it.get('url') or f'https://news.ycombinator.com/item?id={sid}',
+                    'native_id': str(sid),  # 阶段03:自然键 = hn_id
                     'summary': (it.get('text') or '')[:500],
                     'published_at': datetime.fromtimestamp(
                         it.get('time', 0), tz=timezone.utc

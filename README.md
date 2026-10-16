@@ -97,6 +97,7 @@ ai-news-mvp/
 
 - **筛选**(`src/filters.py`):字段完整、时间窗口、AI 关键词命中,不做评分。
 - **去重**(`src/dedup.py`):① URL 归一化(去跟踪参数/默认端口/www);② 标题 SimHash(汉明距离 ≤ `dedup.simhash_threshold`,默认 4);③ 标题或摘要 token 集合 Jaccard 相似度 ≥ `dedup.similarity_threshold`(默认 0.8)判为重复。
+- **入库归并**(阶段03,`src/storage/db.py`):`items` 唯一键 `UNIQUE(platform, native_id)`(自然键:GitHub `full_name` / HN `hn_id` / RSS `(source_id, guid)` 无 guid 回退归一化 url / HF `arxiv_id` 回退 url);入库先按自然键精确匹配,未命中再按内容指纹 `canonical_key`(标题归一化 SimHash)近 7 天窗口模糊匹配(阈值 4),命中则合并——新来源挂 `item_sources`,标题/摘要择优,`first_seen_at` 保留最早,不拒绝;近似标题(指纹距离 > 4)不误并。
 - **限量发生在去重之后**:采集器内部不再限量,先统一跨源去重再按每平台上限截断,避免跨源重复内容各自占掉限量名额。
 - **每平台上限** `per_platform_cap: 10`:只是上限,允许不足 10 条。
 - **趋势**(`src/trend.py`):对项目(基于快照)与主题(基于日统计)输出五态,见下节。
@@ -238,7 +239,7 @@ SQLite 全表 + FTS5 全文索引(连接时 `CREATE TABLE IF NOT EXISTS` 自动�
 | 表 | 作用 |
 |---|---|
 | `sources` | 来源配置/启用/最后成功/错误(`last_error`) |
-| `items` | 情报条目(url UNIQUE + 内容哈希去重) |
+| `items` | 情报条目(唯一键 `UNIQUE(platform, native_id)`;url 为普通列;`canonical_key` 标题指纹供跨源归并) |
 | `item_sources` | 同一事件多来源映射 |
 | `project_snapshots` | GitHub 项目每日快照(`repo, date` 主键:stars/forks/pushed_at/created_at/description/language/topics≤5/fetched_at) |
 | `topic_daily_stats` | 每天每主题条目数/来源数/代表情报 |

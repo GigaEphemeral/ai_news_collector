@@ -137,10 +137,13 @@ class GitHubCollector:
 
     @staticmethod
     def _to_entry(f):
-        """统一条目(供去重/入库);GitHub 轻量字段整体放入 extra。"""
+        """统一条目(供去重/入库);GitHub 轻量字段整体放入 extra。
+
+        阶段03: native_id = full_name(自然键)。"""
         return {
             'title': f['full_name'],
             'url': f['html_url'],
+            'native_id': f['full_name'],
             'summary': f['description'],
             'published_at': f['pushed_at'] or f['created_at'],
             'platform': 'github',

@@ -16,6 +16,19 @@ from ..core.vendor.lsh_dedup import compute_simhash, is_similar
 
 _CJK_RE = re.compile(r'[\u4e00-\u9fff]')
 _WORD_RE = re.compile(r'[a-z0-9]+')
+_TITLE_CLEAN_RE = re.compile(r'[^\w\u4e00-\u9fff]+', re.UNICODE)
+
+
+def normalize_title(title):
+    """标题归一化:小写、去标点、压缩空白(用于内容指纹 canonical_key)。"""
+    t = (title or '').lower()
+    t = _TITLE_CLEAN_RE.sub(' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+def canonical_key(title):
+    """内容指纹:归一化标题的 SimHash(阶段03 跨源模糊合并用)。"""
+    return compute_simhash(normalize_title(title))
 
 
 def _tokens(text):

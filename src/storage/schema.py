@@ -32,15 +32,18 @@ CREATE TABLE IF NOT EXISTS items (
   id INTEGER PRIMARY KEY,
   source_id INTEGER REFERENCES sources(id),
   platform TEXT,
+  native_id TEXT,               -- 各源自然键:GitHub full_name / HN hn_id / RSS (source_id,guid) / HF arxiv_id
   title TEXT NOT NULL,
-  url TEXT UNIQUE NOT NULL,
+  url TEXT NOT NULL,            -- 普通列(不再 UNIQUE;同 URL 由自然键 + 指纹合并保证只一条)
   summary TEXT,
   published_at TEXT,
   content_hash INTEGER,
+  canonical_key INTEGER,        -- 内容指纹:标题归一化 SimHash(跨源模糊合并用)
   category TEXT,
   extra TEXT,
   first_seen_at TEXT,
-  last_seen_at TEXT
+  last_seen_at TEXT,
+  UNIQUE (platform, native_id)  -- 阶段03:自然键唯一约束替代 url UNIQUE
 );
 CREATE TABLE IF NOT EXISTS item_sources (
   item_id INTEGER REFERENCES items(id) ON DELETE CASCADE,
@@ -120,6 +123,67 @@ END;
 """
 
 
+# 阶段03:新 items 表结构(url 不再 UNIQUE,自然键 UNIQUE(platform, native_id),
+# 新增 native_id / canonical_key 列)。旧库 items 为 url UNIQUE,需重建迁移。
+ITEMS_V3 = """
+CREATE TABLE items (
+  id INTEGER PRIMARY KEY,
+  source_id INTEGER REFERENCES sources(id),
+  platform TEXT,
+  native_id TEXT,
+  title TEXT NOT NULL,
+  url TEXT NOT NULL,
+  summary TEXT,
+  published_at TEXT,
+  content_hash INTEGER,
+  canonical_key INTEGER,
+  category TEXT,
+  extra TEXT,
+  first_seen_at TEXT,
+  last_seen_at TEXT,
+  UNIQUE (platform, native_id)
+);
+"""
+
+# items 相关索引(迁移重建用;与 SCHEMA 保持一致)
+ITEMS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_items_platform ON items(platform);
+CREATE INDEX IF NOT EXISTS idx_items_published_at ON items(published_at);
+CREATE INDEX IF NOT EXISTS idx_items_first_seen ON items(first_seen_at);
+"""
+
+
+def _items_needs_v3_migration(conn):
+    """旧 items 表缺 native_id 列 → 需要重建迁移。"""
+    cols = {r['name'] for r in conn.execute('PRAGMA table_info(items)')}
+    return 'native_id' not in cols
+
+
+def _migrate_items_v3(conn):
+    """把旧 items(url UNIQUE)重建为新结构(native_id 回退为 url)。
+
+    rename items 会触发 SQLite 重写其他表(如 item_sources)对 items 的
+    FK 引用,因此迁移期间关闭外键,结束后恢复。"""
+    conn.execute('PRAGMA foreign_keys=OFF')
+    try:
+        conn.execute('ALTER TABLE items RENAME TO items_old')
+        conn.executescript(ITEMS_V3)
+        conn.execute(
+            '''INSERT INTO items (id, source_id, platform, native_id, title, url, summary,
+                                  published_at, content_hash, canonical_key, category, extra,
+                                  first_seen_at, last_seen_at)
+               SELECT id, source_id, platform, url, title, url, summary,
+                      published_at, content_hash, NULL, category, extra,
+                      first_seen_at, last_seen_at FROM items_old''')
+        conn.execute('DROP TABLE items_old')
+        # 旧表 rename 时索引随之改名,重建新表索引
+        conn.executescript(ITEMS_INDEXES)
+        conn.commit()
+    finally:
+        conn.execute('PRAGMA foreign_keys=ON')
+    logging.info('items 表已迁移到阶段03 结构(url UNIQUE → UNIQUE(platform, native_id))')
+
+
 def _migrate_daily_reports(conn):
     """阶段04:给已存在的 daily_reports 表补 last_error 列(旧库无此列)。"""
     for ddl in ('ALTER TABLE daily_reports ADD COLUMN last_error TEXT',):
@@ -131,9 +195,31 @@ def _migrate_daily_reports(conn):
 
 
 def ensure_schema(conn):
-    """建表 + FTS5 初始化;返回 fts_available(bool)。"""
+    """建表 + 迁移 + FTS5 初始化;返回 fts_available(bool)。"""
     conn.executescript(SCHEMA)
+    # 旧 items 缺 native_id → 重建迁移;迁移会 rename items,FTS 触发器/虚拟表
+    # 的 content=items 引用会失效,因此先清掉 FTS 再重建(见 _setup_fts)。
+    if _items_needs_v3_migration(conn):
+        _drop_fts(conn)
+        _migrate_items_v3(conn)
     _migrate_daily_reports(conn)
+    return _setup_fts(conn)
+
+
+def _drop_fts(conn):
+    """删除 FTS 虚拟表与同步触发器(迁移前清理,避免引用失效表)。"""
+    try:
+        conn.execute('DROP TRIGGER IF EXISTS items_ai')
+        conn.execute('DROP TRIGGER IF EXISTS items_ad')
+        conn.execute('DROP TRIGGER IF EXISTS items_au')
+        conn.execute('DROP TABLE IF EXISTS items_fts')
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+
+
+def _setup_fts(conn):
+    """重建 FTS 虚拟表 + 触发器,并对存量 items rebuild;返回 fts_available。"""
     fts_available = False
     try:
         conn.executescript(FTS_SCHEMA)

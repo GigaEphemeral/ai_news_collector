@@ -8,9 +8,10 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .schema import ensure_schema
+from ..core.vendor.lsh_dedup import is_similar
 
 
 def utcnow_iso():
@@ -125,40 +126,104 @@ class Database:
 
     def upsert_item(self, platform, title, url, summary, published_at,
                     content_hash, category, extra, source_id,
-                    source_url=None, first_seen_at=None, seen_at=None):
-        """统一字段入库;url 冲突时更新 last_seen_at。
+                    source_url=None, first_seen_at=None, seen_at=None,
+                    native_id=None, canonical_key=None,
+                    fingerprint_threshold=4, merge_window_days=7):
+        """统一字段入库(阶段03:唯一 key 双层身份 + 跨源归并)。
 
-        同时维护 item_sources(跨源映射)。可选覆盖 first_seen_at/seen_at(演示/回填用)。
+        匹配顺序:
+          1. 自然键精确匹配: UNIQUE(platform, native_id);
+             native_id 未传时回退为 url(兼容旧调用)。
+          2. 未命中 → 指纹模糊匹配: canonical_key(标题归一化 SimHash)近
+             merge_window_days 天内汉明距离 ≤ fingerprint_threshold(默认 4),
+             或同 url 近窗口内已有条目;
+          3. 命中(自然键或指纹)→ 合并: 新来源挂 item_sources,标题/摘要择优
+             (取较长),first_seen 保留最早,last_seen 更新;不拒绝。
+          4. 未命中 → 插入新行。
 
-        返回 (action, item_id),action ∈ {'inserted', 'updated'}。
+        返回 (action, item_id),action ∈ {'inserted', 'updated', 'merged'}。
         """
         now = seen_at or utcnow_iso()
         fsa = first_seen_at or now
-        existed = self.conn.execute(
-            'SELECT id FROM items WHERE url=?', (url,)).fetchone()
-        self.conn.execute(
-            '''INSERT INTO items (source_id, platform, title, url, summary,
-                                  published_at, content_hash, category, extra,
-                                  first_seen_at, last_seen_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(url) DO UPDATE SET last_seen_at=excluded.last_seen_at''',
-            (source_id, platform, title, url, summary, published_at,
-             content_hash, category, json.dumps(extra or {}, ensure_ascii=False),
-             fsa, now),
-        )
-        row = self.conn.execute('SELECT id FROM items WHERE url=?', (url,)).fetchone()
-        item_id = row['id']
-        if source_id is not None:
+        native_id = native_id or url
+
+        # 1) 自然键精确匹配
+        row = self.conn.execute(
+            'SELECT * FROM items WHERE platform=? AND native_id=?',
+            (platform, native_id)).fetchone()
+        if row is None:
+            # 2) 指纹/URL 模糊匹配(近窗口)
+            row = self._find_merge_target(platform, url, canonical_key, now,
+                                          fingerprint_threshold, merge_window_days)
+        if row is None:
+            # 4) 插入
             self.conn.execute(
-                '''INSERT INTO item_sources (item_id, source_id, source_url, seen_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(item_id, source_id) DO UPDATE SET
-                     source_url=excluded.source_url, seen_at=excluded.seen_at''',
-                (item_id, source_id, source_url or '', now),
+                '''INSERT INTO items (source_id, platform, native_id, title, url, summary,
+                                      published_at, content_hash, canonical_key, category, extra,
+                                      first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (source_id, platform, native_id, title, url, summary, published_at,
+                 content_hash, canonical_key, category,
+                 json.dumps(extra or {}, ensure_ascii=False), fsa, now),
             )
+            item_id = self.conn.execute(
+                'SELECT id FROM items WHERE platform=? AND native_id=?',
+                (platform, native_id)).fetchone()['id']
+            self._attach_source(item_id, source_id, source_url, now)
+            self.conn.commit()
+            return 'inserted', item_id
+
+        # 3) 合并:标题/摘要择优(取较长),first_seen 保留最早
+        item_id = row['id']
+        new_title = title if len(title or '') >= len(row['title'] or '') else row['title']
+        new_summary = (summary if len(summary or '') >= len(row['summary'] or '')
+                       else row['summary'])
+        earliest = min(fsa, row['first_seen_at'] or fsa)
+        self.conn.execute(
+            '''UPDATE items SET source_id=COALESCE(source_id, ?), title=?, summary=?,
+                 first_seen_at=?, last_seen_at=?, canonical_key=COALESCE(?, canonical_key),
+                 extra=COALESCE(?, extra)
+               WHERE id=?''',
+            (source_id, new_title, new_summary, earliest, now,
+             canonical_key, json.dumps(extra or {}, ensure_ascii=False) if extra else None,
+             item_id),
+        )
+        self._attach_source(item_id, source_id, source_url, now)
         self.conn.commit()
-        action = 'updated' if existed else 'inserted'
+        action = 'updated' if (row['platform'] == platform and row['native_id'] == native_id) else 'merged'
         return action, item_id
+
+    def _find_merge_target(self, platform, url, canonical_key, now,
+                           fingerprint_threshold=4, merge_window_days=7):
+        """指纹/URL 模糊匹配:近 merge_window_days 天内 canonical_key 汉明距离
+        ≤ 阈值,或 url 完全相同的条目。返回首个命中行或 None。"""
+        cutoff = (datetime.fromisoformat(now) - timedelta(days=merge_window_days)
+                  if isinstance(now, str) else now - timedelta(days=merge_window_days))
+        if isinstance(cutoff, datetime):
+            cutoff = cutoff.isoformat()
+        rows = self.conn.execute(
+            'SELECT * FROM items WHERE last_seen_at >= ?',
+            (cutoff,)).fetchall()
+        for r in rows:
+            if canonical_key is not None and r['canonical_key'] is not None:
+                if is_similar(int(canonical_key), int(r['canonical_key']),
+                              threshold=fingerprint_threshold):
+                    return r
+            if url and r['url'] == url:
+                return r
+        return None
+
+    def _attach_source(self, item_id, source_id, source_url, seen_at):
+        """把来源挂到 item_sources(幂等)。"""
+        if source_id is None:
+            return
+        self.conn.execute(
+            '''INSERT INTO item_sources (item_id, source_id, source_url, seen_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(item_id, source_id) DO UPDATE SET
+                 source_url=excluded.source_url, seen_at=excluded.seen_at''',
+            (item_id, source_id, source_url or '', seen_at),
+        )
 
     def count_items(self):
         return self.conn.execute('SELECT count(*) FROM items').fetchone()[0]

@@ -40,7 +40,7 @@ from src.collectors.github import GitHubCollector
 from src.collectors.hackernews import HackerNewsCollector
 from src.collectors.rss import fetch_rss_and_hf
 from src.pipeline.filters import rule_filter
-from src.pipeline.dedup import Deduper
+from src.pipeline.dedup import Deduper, canonical_key
 from src.pipeline.topic_stats import compute_topic_stats
 from src.reporting.trend import build_trends
 
@@ -219,9 +219,11 @@ def main():
                 deduped.append({
                     'platform': platform,
                     'title': e['title'], 'url': e['url'],
+                    'native_id': e.get('native_id'),  # 阶段03:自然键
                     'summary': e.get('summary', ''),
                     'published_at': e.get('published_at', ''),
                     'content_hash': deduper.last_hash,
+                    'canonical_key': canonical_key(e['title']),  # 阶段03:内容指纹
                     'category': e.get('category', platform),
                     'extra': e.get('extra', {}),
                     'source_url': e.get('_source_url', f"{platform}:default"),
@@ -288,6 +290,7 @@ def main():
                     summary=it['summary'], published_at=it['published_at'],
                     content_hash=it['content_hash'], category=it['category'],
                     extra=it['extra'], source_id=src_id, source_url=it['source_url'],
+                    native_id=it.get('native_id'), canonical_key=it.get('canonical_key'),
                 )
                 if action == 'inserted':
                     db_stats['items_inserted'] += 1
