@@ -204,22 +204,23 @@ flowchart LR
 ## 4. 快速开始
 
 ```bash
-# 1) 准备虚拟环境并装依赖(在项目根)
-cd /home/czq/ai_news/ai_news_collector
+# 1) 准备虚拟环境并装依赖(在项目根 = 仓库根目录,即 run.py 所在处)
+cd <项目根>
 python3.14 -m venv --without-pip .venv        # 系统无 pip 时先引导
 .venv/bin/python get-pip.py || true          # 或已有 pip 则跳过
 .venv/bin/python -m pip install -r requirements.txt
 
 # 2) 准备秘密 .env(复制模板并填入真实值,chmod 600)
 #    .env 定位:AI_NEWS_ENV_PATH 环境变量 → 项目根上两级 .env → 项目根 .env
-#    本项目部署时 .env 在 /home/czq/ai_news/.env,运行前 export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env
+#    部署时 .env 通常在项目根上两级目录(../../.env),运行前显式指定:
+#    export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env
 cp .env.example .env && chmod 600 .env        # 填入 GITHUB_PAT / FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_KEYWORD
 ```
 
 ```bash
 # 3) 日常运行(重要:必须用 .venv 的 python,不要用系统 python3)
-cd /home/czq/ai_news/ai_news_collector
-export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env
+cd <项目根>
+export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env   # 按实际 .env 位置指定
 
 ./.venv/bin/python run.py --since-days 7             # ① 仅采集(全量入库)
 ./.venv/bin/python run.py --report                   # ② 采集 + 生成日报存库
@@ -365,11 +366,11 @@ multica autopilot runs <autopilot-id>
 
 ```bash
 crontab -e
-# 每天 08:00 全链路(采集+生成+发送)
-0 8 * * * cd <项目根> && export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env && <项目根>/.venv/bin/python run.py --since-days 7 --report --send >> <项目根上两级>/logs/cron.log 2>&1
+# 每天 08:00 全链路(采集+生成+发送);<项目根> 为仓库根目录(含 run.py)
+0 8 * * * cd <项目根> && export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env && <项目根>/.venv/bin/python run.py --since-days 7 --report --send >> <项目根>/../../logs/cron.log 2>&1
 # 或拆分两步:21:30 采集,21:45 生成并发送
-30 21 * * * cd <项目根> && export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env && <项目根>/.venv/bin/python run.py --since-days 7 >> <项目根上两级>/logs/cron.log 2>&1
-45 21 * * * cd <项目根> && export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env && <项目根>/.venv/bin/python run.py --report --send --date $(date +\%Y-\%m-\%d) >> <项目根上两级>/logs/cron.log 2>&1
+30 21 * * * cd <项目根> && export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env && <项目根>/.venv/bin/python run.py --since-days 7 >> <项目根>/../../logs/cron.log 2>&1
+45 21 * * * cd <项目根> && export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env && <项目根>/.venv/bin/python run.py --report --send --date $(date +\%Y-\%m-\%d) >> <项目根>/../../logs/cron.log 2>&1
 ```
 
 日志按日滚动,保留 90 天;程序幂等,重复跑安全。

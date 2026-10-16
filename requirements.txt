@@ -1,4 +1,4 @@
-# 阶段02 轻量依赖(已装于 /home/czq/ai_news/code/.venv)
+# 阶段02 轻量依赖(安装于项目虚拟环境 .venv)
 # 不装 torch / playwright / psycopg2 / PostgreSQL(硬性约束 #9)
 requests>=2.31
 httpx[socks]>=0.27        # [socks] 提供 socksio,兼容 ALL_PROXY=socks://127.0.0.1:7897

@@ -1,21 +1,21 @@
 # 每日AI情报 · 定时任务操作手册(Agent 用)
 
 > 你是 Multica 定时任务的执行 agent。任务:按下面步骤运行 Python 脚本完成「采集 → 日报 → 飞书发送」,并核对结果、在本 issue 汇报。
-> **必须真实执行命令,禁止虚构结果。** 环境:Linux,项目根 `/home/czq/ai_news/ai_news_collector`。
+> **必须真实执行命令,禁止虚构结果。** 环境:Linux;所有命令在**项目根目录**下执行(仓库根 = 项目根,即 `run.py` 所在目录)。
 
 ## 0. 环境速查
 
-| 项 | 值 |
+| 项 | 值(均相对项目根) |
 |---|---|
-| 项目根 | `/home/czq/ai_news/ai_news_collector` |
+| 项目根 | 仓库根目录(含 `run.py`)—— 先 `cd` 到此处 |
 | Python | `./.venv/bin/python`(**不要用系统 python3**) |
-| 秘密文件 | `/home/czq/ai_news/.env`(运行时用 `AI_NEWS_ENV_PATH` 指定) |
-| 数据目录 | `/home/czq/ai_news/data` |
+| 秘密文件 | 项目根**上两级目录**的 `.env`(如 `../../.env`;运行时用 `AI_NEWS_ENV_PATH` 显式指定) |
+| 数据目录 | 项目根**上两级目录**的 `data`(默认 `../../data`;见 `config.yaml` 的 `paths.data_dir`) |
 | 今日日期 | 用 `date +%Y-%m-%d` 获取(UTC 与东八区注意) |
 
 ```bash
-cd /home/czq/ai_news/ai_news_collector
-export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env
+cd <项目根>          # 仓库根目录
+export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env   # 或按实际 .env 位置指定
 DATE=$(date +%Y-%m-%d)
 ```
 
@@ -77,13 +77,13 @@ ls -la data/ai_news_mvp_candidates_$(date +%Y%m%d).json data/ai_news_mvp_draft_$
 
 | 现象 | 判断 | 处理 |
 |---|---|---|
-| 退出码 1,`[FAIL] 所有来源失败` | 断网/全源挂 | 查看 `data/ai_news_mvp_run_*.json` 的 `platforms[*].error` 与 `sources.last_error`;网络恢复后重跑,幂等无害 |
+| 退出码 1,`[FAIL] 所有来源失败` | 断网/全源挂 | 查看数据目录(`paths.data_dir`,相对项目根)下 `ai_news_mvp_run_*.json` 的 `platforms[*].error` 与 `sources.last_error`;网络恢复后重跑,幂等无害 |
 | 部分来源失败,退出码 0 | 单源问题 | 其余源照常,汇报失败源;GitHub 403/429 是限流,跳过该查询,不重试硬闯 |
 | `--report` 退出 1 | 日报生成失败 | 看异常;Ollama 不可达会自动降级规则模式,不应失败;必要时 `--no-summarize` |
 | `--send` 退出 1,status=failed | 飞书返回错误/重试耗尽 | 检查 `.env` 的 `FEISHU_WEBHOOK_URL`/关键词;`daily_reports.last_error` 已脱敏;恢复后 `--send --date` 重发 |
 | `--send` status=uncertain | 超时/响应无法解析 | 停止重发(避免重复推送),人工确认后可手动重发 |
 | check_draft 有 `{{` 残留 | 占位符未渲染完 | 用 render_draft 补渲染或回退;条数不匹配重试 1 次 |
-| 想重置库 | 数据异常 | 删 `data/ai_news_mvp.sqlite3` 后重跑(自动建表) |
+| 想重置库 | 数据异常 | 删 `paths.data_dir` 下的 `ai_news_mvp.sqlite3` 后重跑(自动建表) |
 
 ## 7. 汇报格式(在本 issue 贴评论)
 
@@ -92,7 +92,7 @@ ls -la data/ai_news_mvp_candidates_$(date +%Y%m%d).json data/ai_news_mvp_draft_$
 采集:4/4 来源成功,发现 N → 筛选 N → 去重 N → 入库 N 条(或列出失败源)
 日报:已生成并写入 daily_reports;模型状态:<Ollama 摘要/规则模式>
 发送:sent(或 skipped_already_sent / failed:<原因>)
-产物:data/ai_news_mvp_run_YYYYMMDD.json / candidates / draft
+产物:<paths.data_dir>/ai_news_mvp_run_YYYYMMDD.json / candidates / draft
 ```
 
 - 结果必须来自真实命令输出,不得虚构。

@@ -46,11 +46,12 @@ def test_agent_readme_exists_with_10_sections():
     for key in ('步骤① 采集', '步骤② 生成日报', '步骤④ 发送飞书',
                 '失败处理', '汇报格式', '时区与调度'):
         assert key in content, f'缺少关键节 {key}'
-    # 关键命令/事实抽查
+    # 关键命令/事实抽查(全部相对路径,禁止完整路径)
     assert './.venv/bin/python run.py --since-days 7' in content
     assert '--report' in content and '--send' in content
-    assert '/home/czq/ai_news/ai_news_collector' in content
-    assert 'AI_NEWS_ENV_PATH=/home/czq/ai_news/.env' in content
+    assert '/home/czq' not in content, 'agent_readme 禁止出现完整路径'
+    assert '<项目根>' in content, '用相对/占位路径表示项目根'
+    assert '../../' in content or 'AI_NEWS_ENV_PATH' in content
     assert 'FEISHU_WEBHOOK_URL' in content
     assert 'code' in content and '0' in content
     assert 'Asia/Shanghai' in content
