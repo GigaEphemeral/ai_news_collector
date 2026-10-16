@@ -40,17 +40,22 @@ def test_agent_readme_exists_with_10_sections():
     path = os.path.join(root, 'agent_readme.md')
     assert os.path.exists(path)
     content = open(path, encoding='utf-8').read()
-    for i in range(1, 11):
+    # 操作手册结构:步骤 0-8 + 总览/失败处理/汇报格式/调度
+    for i in range(0, 9):
         assert f'## {i}.' in content, f'缺少第 {i} 节'
-    # 关键内容抽查
-    assert 'temperature' in content and '0.1' in content
-    assert 'num_predict' in content and '512' in content
-    assert 'num_ctx' in content and '4096' in content
-    assert 'repeat_penalty' in content and '1.05' in content
-    assert '分批' in content and '4' in content
-    assert '{{MODEL_STATUS}}' in content
+    for key in ('步骤① 采集', '步骤② 生成日报', '步骤④ 发送飞书',
+                '失败处理', '汇报格式', '时区与调度'):
+        assert key in content, f'缺少关键节 {key}'
+    # 关键命令/事实抽查
+    assert './.venv/bin/python run.py --since-days 7' in content
+    assert '--report' in content and '--send' in content
+    assert '/home/czq/ai_news/ai_news_collector' in content
+    assert 'AI_NEWS_ENV_PATH=/home/czq/ai_news/.env' in content
     assert 'FEISHU_WEBHOOK_URL' in content
     assert 'code' in content and '0' in content
+    assert 'Asia/Shanghai' in content
+    assert 'check_draft' in content
+    assert 'render_draft' in content
 
 
 def test_render_fallback_no_residue():

@@ -1,79 +1,105 @@
-# Agent 操作手册(命令式)
+# 每日AI情报 · 定时任务操作手册(Agent 用)
 
-你是「每日AI情报」日报编辑。输入 `candidates.json` + `draft.txt`,输出渲染好的日报草稿,可选发飞书。照做,不要发挥。
+> 你是 Multica 定时任务的执行 agent。任务:按下面步骤运行 Python 脚本完成「采集 → 日报 → 飞书发送」,并核对结果、在本 issue 汇报。
+> **必须真实执行命令,禁止虚构结果。** 环境:Linux,项目根 `/home/czq/ai_news/ai_news_collector`。
 
-## 1. 你是谁
+## 0. 环境速查
 
-你是日报编辑 agent。唯一任务:把 `draft.txt` 里的 `{{INTRO_Hx}}` / `{{INTRO_Ox}}` / `{{INTRO_Sx}}` 逐个替换成 ≤50 字中文简介,把 `{{MODEL_STATUS}}` 换成状态文案。
-
-## 2. 输入文件
-
-- `data/ai_news_mvp_candidates_YYYYMMDD.json` — 候选条目(每条含 `placeholder/url/title/platform/facts/reason/content/fallback_intro`)
-- `data/ai_news_mvp_draft_YYYYMMDD.txt` — 待渲染草稿
-- 环境变量 `FEISHU_WEBHOOK_URL` / `FEISHU_WEBHOOK_KEYWORD`(发送用;禁止外泄)
-
-## 3. 任务步骤
-
-1. 读 candidates.json 与 draft.txt。
-2. 每个占位符按 `placeholder` 在 candidates.json 找对应条目,写 ≤50 字中文简介。
-   依据 `content`(已抓好的正文/README)与 `facts`/`reason` 编写,禁止编造。
-3. `{{MODEL_STATUS}}` 填三文案之一(见第 7 节)。
-4. 检查无 `{{` 残留 → 交付;(可选)发飞书。
-
-## 4. 分批 ≤4 条
-
-模型上下文 `num_ctx=4096`,单批超过 4 条会截断/漏答/重复。每批独立调用,失败只回退该批。**每批最多 4 条,不可超过。**
-
-## 5. 每批调用模板
+| 项 | 值 |
+|---|---|
+| 项目根 | `/home/czq/ai_news/ai_news_collector` |
+| Python | `./.venv/bin/python`(**不要用系统 python3**) |
+| 秘密文件 | `/home/czq/ai_news/.env`(运行时用 `AI_NEWS_ENV_PATH` 指定) |
+| 数据目录 | `/home/czq/ai_news/data` |
+| 今日日期 | 用 `date +%Y-%m-%d` 获取(UTC 与东八区注意) |
 
 ```bash
-curl -s http://192.168.0.103:11434/api/chat -d '{
-  "model": "Qwen3.5:9B",
-  "messages": [
-    {"role": "system", "content": "只输出 JSON,不要输出其他内容。"},
-    {"role": "user", "content": "<该批: placeholder+title+content 精简>…输出 JSON 数组,每项 {\"placeholder\":\"…\",\"intro\":\"≤50字中文简介\"}"}
-  ],
-  "stream": false, "think": false, "format": "json",
-  "options": {"temperature": 0.1, "num_predict": 512, "num_ctx": 4096, "repeat_penalty": 1.05}
-}'
+cd /home/czq/ai_news/ai_news_collector
+export AI_NEWS_ENV_PATH=/home/czq/ai_news/.env
+DATE=$(date +%Y-%m-%d)
 ```
 
-拿到 JSON 数组后逐条替换占位符。输出条数必须与输入一致。
+## 1. 步骤总览
 
-## 6. 硬性规则(违反即失败)
+```
+① 采集      run.py --since-days 7
+② 生成日报  run.py --report --date $DATE
+③ 核对产出  检查 data/ai_news_mvp_run_*.json / candidates / draft
+④ 发送飞书  run.py --send --date $DATE(或 ② 时直接 --report --send)
+⑤ 汇报     在本 issue 贴结果(来源统计/日报摘要/发送状态/失败原因)
+```
 
-1. 只改占位符本身,草稿其他内容一个字都不许动。
-2. 每批输出条数 = 输入条数,多写漏写都算失败。
-3. 禁止访问任何 URL,只准用 candidates.json 里给的内容。
-4. 禁止新增/删除栏目、改占位符名、重排条目。
-5. 禁止编造数据;不确定就写「原文未提供详细信息」。
+> 推荐:一次跑完 `run.py --since-days 7 --report --send`(采集+生成+发送);也可分步跑(见下)。
 
-## 7. `{{MODEL_STATUS}}` 三文案
+## 2. 步骤① 采集
 
-- 全部成功 → `Agent 渲染成功(全部占位符已替换)`
-- 部分回退 → `Agent 渲染部分成功(N/M 条占位符回退到 fallback_intro)`
-- 全部失败 → `Agent 渲染失败,日报内容为脚本规则生成`
+```bash
+./.venv/bin/python run.py --since-days 7
+```
 
-## 8. 发飞书
+- 期望:输出 `[OK] 完成,4/4 个来源成功(失败:无),发现 N → 筛选 N → 去重 N → 入库 N 条`,退出码 0。
+- 核对:`ls data/ai_news_mvp_run_$(date +%Y%m%d).json`,`python3 -c "import json;d=json.load(open('data/ai_news_mvp_run_YYYYMMDD.json'));print(d['platforms'])"`。
+- 退出码 1 = 全部来源失败或无条目 → 见第 6 节处理。
 
-- webhook 只从 `FEISHU_WEBHOOK_URL` 读,禁止打印/写日志/写代码。
-- 正文必须含安全关键词(默认「每日ai情报」),否则拒绝发送。
-- 飞书返回 `code==0` 才算成功;`code!=0` 立即停止;超时/无法解析 → 停止重发,避免重复推送;已 `sent` 的日报不重发。
+## 3. 步骤② 生成日报
 
-## 9. 失败处理
+```bash
+./.venv/bin/python run.py --report --date $DATE
+```
 
-| 失败 | 处理 |
-|---|---|
-| content 为空 | 用该条 `fallback_intro` 替换 |
-| 输出非 JSON / 条数不匹配 | 该批重试 1 次,仍失败整批回退 `fallback_intro` |
-| Ollama 不可达/超时 | 该批回退 `fallback_intro`,不阻塞其他批 |
-| 飞书 `code!=0` | 停止发送,报原因(webhook 脱敏) |
-| 飞书超时 | 停止重发,置 `uncertain` |
+- 期望:输出日报正文,`[OK]`,退出码 0;日报写入 SQLite `daily_reports` 表。
+- 生成与发送分离:飞书不可达时先 `--report`,恢复后单独 `--send` 重发,不重新采集。
+- `--no-summarize`:跳过 Ollama,强制规则模式(不烧 token)。
 
-## 10. 调试
+## 4. 步骤③ 核对产出(Agent 模式产物,可选但推荐)
 
-- 自检:`python -m src.tools.check_draft data/ai_news_mvp_draft_YYYYMMDD.txt --report data/ai_news_mvp_candidates_YYYYMMDD.json`
-- 有 `{{` 残留 → 补写或回退该占位符
-- 条数不匹配 → 重跑该批 1 次
-- content 全空 → 查抓取日志(content_fetcher)
-- 飞书失败 → 查 `FEISHU_WEBHOOK_URL` 与 `daily_reports.last_error`
+```bash
+ls -la data/ai_news_mvp_candidates_$(date +%Y%m%d).json data/ai_news_mvp_draft_$(date +%Y%m%d).txt
+./.venv/bin/python -m src.tools.check_draft data/ai_news_mvp_draft_$(date +%Y%m%d).txt --report data/ai_news_mvp_candidates_$(date +%Y%m%d).json
+```
+
+- 期望:`[OK] draft 无 {{ 残留,占位符全部渲染完成`。
+- 若需程序化渲染占位符(无模型时):`./.venv/bin/python -m src.tools.render_draft <draft> <candidates.json> -o out.txt`。
+- **不访问任何 URL**:简介只用 candidates.json 里的 `content/facts/reason`,不自行抓链接。
+
+## 5. 步骤④ 发送飞书
+
+```bash
+./.venv/bin/python run.py --send --date $DATE
+```
+
+- 期望:输出发送结果 `{'status': 'sent' | 'skipped_already_sent', ...}`,退出码 0。
+- 幂等:当日已 `sent` 会返回 `skipped_already_sent`,不重复发送,属正常。
+- 飞书判定:只有飞书确认 `code==0` 才算发送成功;`code!=0` 为失败(重试耗尽后 `status=failed`);超时/响应无法解析 → `status=uncertain`,停止重发(避免重复推送)。
+- webhook 全程脱敏,不得打印/外泄。
+
+## 6. 失败处理(逐条对照)
+
+| 现象 | 判断 | 处理 |
+|---|---|---|
+| 退出码 1,`[FAIL] 所有来源失败` | 断网/全源挂 | 查看 `data/ai_news_mvp_run_*.json` 的 `platforms[*].error` 与 `sources.last_error`;网络恢复后重跑,幂等无害 |
+| 部分来源失败,退出码 0 | 单源问题 | 其余源照常,汇报失败源;GitHub 403/429 是限流,跳过该查询,不重试硬闯 |
+| `--report` 退出 1 | 日报生成失败 | 看异常;Ollama 不可达会自动降级规则模式,不应失败;必要时 `--no-summarize` |
+| `--send` 退出 1,status=failed | 飞书返回错误/重试耗尽 | 检查 `.env` 的 `FEISHU_WEBHOOK_URL`/关键词;`daily_reports.last_error` 已脱敏;恢复后 `--send --date` 重发 |
+| `--send` status=uncertain | 超时/响应无法解析 | 停止重发(避免重复推送),人工确认后可手动重发 |
+| check_draft 有 `{{` 残留 | 占位符未渲染完 | 用 render_draft 补渲染或回退;条数不匹配重试 1 次 |
+| 想重置库 | 数据异常 | 删 `data/ai_news_mvp.sqlite3` 后重跑(自动建表) |
+
+## 7. 汇报格式(在本 issue 贴评论)
+
+```text
+✅ 每日AI情报日报 <DATE>
+采集:4/4 来源成功,发现 N → 筛选 N → 去重 N → 入库 N 条(或列出失败源)
+日报:已生成并写入 daily_reports;模型状态:<Ollama 摘要/规则模式>
+发送:sent(或 skipped_already_sent / failed:<原因>)
+产物:data/ai_news_mvp_run_YYYYMMDD.json / candidates / draft
+```
+
+- 结果必须来自真实命令输出,不得虚构。
+- webhook/token 严禁出现在任何评论、日志、代码里。
+
+## 8. 时区与调度提示
+
+- Multica autopilot 定时触发必须显式 `--timezone Asia/Shanghai`,否则默认 UTC 会偏 8 小时。
+- 建议节奏:采集 21:30,日报发送 21:45(先采后发);实测单次采集约 60–70s。
+- 重跑安全:程序幂等,重复执行不产生重复发送/重复数据。
