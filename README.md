@@ -235,6 +235,8 @@ export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env   # 按实际 .env 位置指定
 
 常用 flag:`--date YYYY-MM-DD`(指定运行日期)/ `--db PATH`(指定库文件)/ `--config PATH` / `--since-days N`。`--report` 与 `--send` 分离:飞书不可用时先 `--report`,恢复后直接 `--send` 重发,不重新抓取。
 
+> **运行日期与采集窗口(重要)**:`run_date` 取 UTC 日期(或 `--date`)。北京时间 08:00 = UTC 00:00 同日,因此**每日 08:00(北京时间)运行,run_date 正好等于北京当天日期**。采集窗口不是严格 24h,而是**各源年龄窗口**:GitHub 创建后 `since_days`(默认 7 天)/ HN 最近 3 天 / RSS 最近 7 天 / HF 最近 14 天。**日报候选 = 当日活跃条目**(`first_seen_at` 或 `last_seen_at` 落在 run_date;阶段05修复:昨天已入库、今天又被采集刷新的条目也会进入当日日报,避免日报为空)。
+
 ---
 
 ## 5. 可配置信息总结

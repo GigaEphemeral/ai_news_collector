@@ -12,6 +12,7 @@ import tempfile
 
 from src.storage.db import Database
 from src.pipeline.topic_stats import compute_topic_stats, _tag_matches
+from src.reporting.report import collect_candidates
 from src.reporting.trend import build_trends, topic_trend
 
 AI_KW = ['ai', 'llm', 'gpt', 'agent', 'rag', 'anthropic', 'openai', 'deepseek',
@@ -100,4 +101,34 @@ def test_build_trends_attaches_representative():
     assert topics, '应有主题趋势'
     for t in topics:
         assert any('代表条目' in e for e in t['evidence']), f'{t["topic"]} 缺代表条目来源'
+    db.close()
+
+
+# ---------------------------------------------------------------------------
+# CC 反馈(2026-10-17):每天 08:00 定时运行时,昨天已入库的条目今天再采集
+# 只有 last_seen 刷新、first_seen 不变 → 旧逻辑(只按 first_seen 选候选)导致日报为空。
+# 修复:collect_candidates 改为 items_active_on(first_seen OR last_seen 落在当日)。
+# ---------------------------------------------------------------------------
+def test_daily_report_includes_refreshed_items():
+    db, d = _make_db()
+    sid = db.upsert_source('github:search', 'GitHub', 'github')
+    # 模拟:10-16 首次入库,10-17 定时运行刷新 last_seen
+    db.upsert_item(platform='github', title='acme/repo', url='https://github.com/acme/repo',
+                   summary='AI agent framework', published_at=None, content_hash=1,
+                   canonical_key=0, category='opensource',
+                   extra={'full_name': 'acme/repo', 'stargazers_count': 100,
+                          'created_at': '2026-10-01T00:00:00Z', 'topics': ['ai', 'agents']},
+                   source_id=sid, first_seen_at='2026-10-16T00:00:00+00:00',
+                   seen_at='2026-10-17T00:00:00+00:00', native_id='acme/repo')
+    cfg = {'report': {'new_days': 30, 'opensource_max': 5, 'solutions_max': 5,
+                      'max_highlights': 3},
+           'trend': {'project': {'young_days': 30}},
+           'keywords': {'ai': ['ai', 'llm', 'agent']}}
+    # 修复前(仅 first_seen):10-17 候选为空 → 日报全空
+    # 修复后(first_seen OR last_seen):10-17 有候选
+    c16 = collect_candidates(db, '2026-10-16', cfg)
+    c17 = collect_candidates(db, '2026-10-17', cfg)
+    assert len(c16) == 1
+    assert len(c17) == 1, '10-17 当天刷新过的条目应进入当日日报候选'
+    assert c17[0]['url'] == 'https://github.com/acme/repo'
     db.close()

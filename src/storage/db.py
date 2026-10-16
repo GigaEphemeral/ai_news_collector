@@ -110,9 +110,20 @@ class Database:
         self.conn.commit()
 
     def items_first_seen_on(self, date):
-        """某日首次出现的去重后条目(日报候选/采集状态统计用)。"""
+        """某日首次出现的去重后条目(采集状态统计用)。"""
         return self.conn.execute(
             'SELECT * FROM items WHERE date(first_seen_at)=? ORDER BY id', (date,)).fetchall()
+
+    def items_active_on(self, date):
+        """某日活跃的条目(日报候选用,阶段05修复)。
+
+        判定:first_seen_at 或 last_seen_at 落在该日 —— 每天定时运行时,当天被
+        重新采集/刷新的条目(last_seen_at=当天)都会进入当日候选,避免"昨天已入库、
+        今天无新 first_seen"导致日报为空。
+        """
+        return self.conn.execute(
+            'SELECT * FROM items WHERE date(first_seen_at)=? OR date(last_seen_at)=? '
+            'ORDER BY id', (date, date)).fetchall()
 
     def latest_run_for_date(self, date):
         """指定日期的最近一次运行记录(standalone 生成日报时反推采集统计)。"""

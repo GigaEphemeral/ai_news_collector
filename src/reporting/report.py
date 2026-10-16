@@ -123,7 +123,7 @@ def collect_candidates(db, run_date, cfg, trends=None):
             state_map[t['repo']] = t['state']
 
     candidates = []
-    for r in db.items_first_seen_on(run_date.isoformat()):
+    for r in db.items_active_on(run_date.isoformat()):
         extra = {}
         try:
             extra = json.loads(r['extra'] or '{}')
@@ -587,7 +587,7 @@ def build_report(db, run_date, cfg, candidates, stats=None, trends=None,
 
     kw = _keyword(cfg)
     title = f"{kw} · AI 情报日报 {run_date.isoformat()}"
-    lines = [title, '采集窗口:过去 24 小时 · 历史趋势:过去 7 天', '']
+    lines = [title, '采集窗口:当日活跃条目(各源年龄窗口内,见 config) · 历史趋势:过去 7 天', '']
     for i, sec_title in enumerate(SECTION_TITLES, 1):
         lines.append(sec_title)
         body_lines = sections[i] or [EMPTY_SECTION_TEXT]
@@ -725,7 +725,7 @@ def build_draft_with_placeholders(candidates, cfg, highlights=None,
     kw = _keyword(cfg)
     date_str = cfg.get('_date') or datetime.now(timezone.utc).date().isoformat()
     title = f"{kw} · AI 情报日报 {date_str}"
-    lines = [title, '采集窗口:过去 24 小时 · 历史趋势:过去 7 天', '']
+    lines = [title, '采集窗口:当日活跃条目(各源年龄窗口内,见 config) · 历史趋势:过去 7 天', '']
     lines.append('一、今日值得关注')
     lines.extend(h_lines or [NO_HOTSPOT_TEXT])
     lines.append('')
