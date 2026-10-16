@@ -63,14 +63,16 @@ class Database:
                           selected_item_ids=None):
         """保存/更新某日日报正文。
 
-        幂等规则:已成功发送(sent)的日报不覆盖,防止重新生成覆盖"已送达"事实;
-        pending/failed/uncertain 可重新生成(重置为 pending,允许从库重发)。
+        [CC 2026-10-16] 幂等跳过逻辑已注释:任何状态下都可重新生成并覆盖
+        (便于反复测试);需要幂等时恢复下方被注释的 sent 跳过。
         selected_item_ids: 当天日报选中的 item id 列表(阶段04,JSON 入库)。
-        返回 'saved' / 'replaced' / 'skipped_sent'。
+        返回 'saved' / 'replaced'(sent 也不再跳过)。
         """
         row = self.get_daily_report(report_date)
-        if row and row['sent_status'] == 'sent':
-            return 'skipped_sent'
+        # [CC 2026-10-16 要求注释] 幂等跳过:已 sent 不重新生成,会挡住反复测试。
+        # 需要幂等时恢复下面两行。
+        # if row and row['sent_status'] == 'sent':
+        #     return 'skipped_sent'
         now = generated_at or utcnow_iso()
         sel = (json.dumps(list(selected_item_ids or []), ensure_ascii=False)
                if selected_item_ids else None)

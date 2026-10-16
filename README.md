@@ -327,7 +327,7 @@ export AI_NEWS_ENV_PATH=$(cd ../.. && pwd)/.env   # 按实际 .env 位置指定
    ```
 3. **发送**:`run.py --report --send`(先生成日报存库,再发送)。发送逻辑见 `src/reporting/feishu.py`:
    - webhook 只从环境变量读取;所有日志/异常/`daily_reports.last_error` 都脱敏为 `<redacted>`。
-   - **幂等**:当日 `sent_status='sent'` 不重复发送;只有飞书确认 `code==0` 才置 `sent`。
+   - **幂等(已注释,CC 2026-10-16)**:当日 `sent_status='sent'` **不再跳过**,会重新发送以便反复测试;只有飞书确认 `code==0` 才置 `sent`。需要幂等时恢复 `feishu.py` 中被注释的 sent 跳过块。
    - 明确失败(HTTP 非 0)→ 指数退避重试 `feishu.max_retries` 次;结果不确定(超时/响应无法解析)→ 置 `uncertain` 停止重发。
    - 发送文本必须含安全关键词,缺失拒绝发送。
 4. **失败恢复**:飞书不可达时日报仍在 `daily_reports`(sent_status=failed),恢复后 `run.py --send --date YYYY-MM-DD` 从库重发,不重新采集。

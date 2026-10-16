@@ -160,16 +160,18 @@ def test_validate_report_flags_missing_keyword_and_overflow():
     assert any('长度' in i for i in validate_report('每日ai情报 ' + 'x' * 100, cfg2))
 
 
-def test_save_daily_report_idempotent_not_overwrite_sent():
+def test_save_daily_report_overwrites_sent_now(monkeypatch):
+    """[CC 2026-10-16] 幂等跳过逻辑已注释:已 sent 的日报也会被重新生成覆盖
+    (便于反复测试)。需要幂等时恢复 db.py 中被注释的两行。"""
     db = _seed(_make_db())
     db.save_daily_report(RUN_DATE, 'body v1')
     row = db.get_daily_report(RUN_DATE)
     assert row['sent_status'] == 'pending'
     db.mark_report_sent(RUN_DATE)
-    # 已 sent 的日报不被覆盖(防止重新生成覆盖"已送达"事实)
-    assert db.save_daily_report(RUN_DATE, 'body v2') == 'skipped_sent'
-    assert db.get_daily_report(RUN_DATE)['body'] == 'body v1'
-    assert db.get_daily_report(RUN_DATE)['sent_status'] == 'sent'
+    # 注释后:已 sent 的日报也会被覆盖
+    assert db.save_daily_report(RUN_DATE, 'body v2') == 'replaced'
+    assert db.get_daily_report(RUN_DATE)['body'] == 'body v2'
+    assert db.get_daily_report(RUN_DATE)['sent_status'] == 'pending'
     db.close()
 
 

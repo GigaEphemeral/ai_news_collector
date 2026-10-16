@@ -321,8 +321,9 @@ class TestFeishuDown:
         assert db.get_daily_report(RUN_DATE)['sent_status'] == 'sent'
         db.close()
 
-    def test_send_idempotent_no_duplicate(self, monkeypatch, tmp_path):
-        """阶段05 验收:重复执行不会重复发送已成功发送的同一天日报。"""
+    def test_send_again_works_after_sent(self, monkeypatch, tmp_path):
+        """[CC 2026-10-16] 幂等跳过逻辑已注释:已 sent 的日报再次 --send 会重新发送
+        (便于反复测试);需要幂等时恢复 feishu.py/db.py 中被注释的代码。"""
         cfg_path = make_cfg(tmp_path)
         _stub_all_ok(monkeypatch)
         monkeypatch.setenv('FEISHU_WEBHOOK_URL', 'https://open.feishu.cn/hook/test-idem')
@@ -343,10 +344,10 @@ class TestFeishuDown:
         assert code == 0
         assert calls['n'] == 1
 
-        # 再次 --send:必须跳过,不再调用 webhook
+        # 再次 --send:注释后不再跳过,会重新调用 webhook(便于测试)
         code = _run(monkeypatch, _argv(cfg_path, '--date', RUN_DATE, '--send'))
         assert code == 0
-        assert calls['n'] == 1, '已 sent 的日报重复 --send 不应再调用 webhook'
+        assert calls['n'] == 2, '注释幂等跳过后再 --send 会重新发送'
         db = _run_db(cfg_path)
         assert db.get_daily_report(RUN_DATE)['sent_status'] == 'sent'
         db.close()

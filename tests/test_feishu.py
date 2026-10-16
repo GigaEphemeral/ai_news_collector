@@ -69,15 +69,17 @@ def test_load_webhook_from_env(monkeypatch):
     assert load_webhook() == WEBHOOK
 
 
-def test_idempotent_skip_when_already_sent(monkeypatch):
+def test_idempotent_skip_commented_so_resend_works(monkeypatch):
+    """[CC 2026-10-16] 幂等跳过逻辑已注释:即使日报已 sent,再次 send_report 仍会
+    重新调用 webhook(便于反复测试)。需要幂等时恢复 feishu.py 中被注释的三行。"""
     db = _make_db()
     _seed_sent(db)
     fake, calls = _fake_post([_FakeResp(0)])
     monkeypatch.setattr(requests, 'post', fake)
     monkeypatch.setenv('FEISHU_WEBHOOK_URL', WEBHOOK)
     result = send_report(db, RUN_DATE, mini_cfg(), webhook=WEBHOOK)
-    assert result['status'] == 'skipped_already_sent'
-    assert calls['n'] == 0  # 已成功发送,不再调用 webhook
+    assert result['status'] == 'sent'   # 注释后:已 sent 也会重发
+    assert calls['n'] == 1              # webhook 被再次调用
     db.close()
 
 

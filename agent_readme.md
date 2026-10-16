@@ -68,8 +68,8 @@ ls -la data/ai_news_mvp_candidates_$(date +%Y%m%d).json data/ai_news_mvp_draft_$
 ./.venv/bin/python run.py --send --date $DATE
 ```
 
-- 期望:输出发送结果 `{'status': 'sent' | 'skipped_already_sent', ...}`,退出码 0。
-- 幂等:当日已 `sent` 会返回 `skipped_already_sent`,不重复发送,属正常。
+- 期望:输出发送结果 `{'status': 'sent' | 'uncertain' | 'failed', ...}`,退出码 0。
+- [CC 2026-10-16] 幂等跳过已注释:已 `sent` 也会重新发送(便于反复测试);恢复幂等需还原 feishu.py 中被注释的 sent 跳过。
 - 飞书判定:只有飞书确认 `code==0` 才算发送成功;`code!=0` 为失败(重试耗尽后 `status=failed`);超时/响应无法解析 → `status=uncertain`,停止重发(避免重复推送)。
 - webhook 全程脱敏,不得打印/外泄。
 
@@ -91,7 +91,7 @@ ls -la data/ai_news_mvp_candidates_$(date +%Y%m%d).json data/ai_news_mvp_draft_$
 ✅ 每日AI情报日报 <DATE>
 采集:4/4 来源成功,发现 N → 筛选 N → 去重 N → 入库 N 条(或列出失败源)
 日报:已生成并写入 daily_reports;模型状态:<Ollama 摘要/规则模式>
-发送:sent(或 skipped_already_sent / failed:<原因>)
+发送:sent(或 failed:<原因> / uncertain)
 产物:<paths.data_dir>/ai_news_mvp_run_YYYYMMDD.json / candidates / draft
 ```
 

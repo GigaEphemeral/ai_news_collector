@@ -4,7 +4,8 @@
 - webhook 只从环境变量 FEISHU_WEBHOOK_URL 读取(.env,定位规则见 src/core/config.py);
   **严禁打印 / 写日志 / 入库**——本模块所有错误信息都会把 webhook 脱敏为
   '<redacted>',调用方拿到的异常文本同样不含 URL。
-- 幂等:发送前查 daily_reports 当日 sent_status == 'sent' → 跳过,不重复发送;
+- [CC 2026-10-16] 幂等跳过逻辑已注释:已 sent 也会重发(便于反复测试);
+  需要幂等时恢复 send_report 中被注释的 sent 跳过。
   只有飞书确认成功(code=0)才置 sent。
 - 明确失败(HTTP 返回非 0)→ 指数退避重试,有限次(max_retries);
   结果不确定(超时 / 响应无法解析)→ 置 uncertain 立即停止,不无限重发。
@@ -91,7 +92,7 @@ def send_report(db, report_date, cfg, webhook=None, keyword=None):
     """发送指定日期的日报(幂等)。
 
     返回 dict:
-      {'status': 'sent'|'skipped_already_sent'|'uncertain'|'failed',
+      {'status': 'sent'|'uncertain'|'failed',   # 幂等跳过已注释,不再返回 skipped_already_sent
        'report_date', 'attempts', 'error'(仅失败), 'sent_at'(仅成功)}
 
     抛 FeishuError:日报不存在 / 缺安全关键词 / webhook 未配置。
@@ -109,10 +110,12 @@ def send_report(db, report_date, cfg, webhook=None, keyword=None):
     body = report['body'] or ''
     if kw not in body:
         raise FeishuError(f'日报缺少安全关键词「{kw}」,拒绝发送(webhook 校验必需)')
-    if report['sent_status'] == 'sent':
-        log.info(f'[飞书] {report_date} 日报已成功发送(sent),跳过重复发送')
-        return {'status': 'skipped_already_sent', 'report_date': report_date,
-                'sent_at': report['sent_at'], 'attempts': 0}
+    # [CC 2026-10-16 要求注释] 幂等跳过:已 sent 不重发,会挡住反复测试。
+    # 需要幂等时恢复下面三行。
+    # if report['sent_status'] == 'sent':
+    #     log.info(f'[飞书] {report_date} 日报已成功发送(sent),跳过重复发送')
+    #     return {'status': 'skipped_already_sent', 'report_date': report_date,
+    #             'sent_at': report['sent_at'], 'attempts': 0}
 
     last_err = None
     for attempt in range(max_retries):
