@@ -1,6 +1,6 @@
 # ai-news-mvp · AI 情报采集器
 
-轻量 AI 情报采集项目:从 **GitHub Search API / Hacker News 官方 API / 官方博客 RSS / Hugging Face Daily Papers** 四类来源采集 AI 相关情报,经规则筛选、去重、限量后写入 **SQLite 全表 + FTS5**,提供**规则趋势引擎**(24h/7d/30d 五态,纯规则不评分不调 LLM)与**模板日报 + 可选 Ollama 摘要 + 飞书幂等发送**。单次运行入口 `run.py`,无自建调度,由平台 autopilot 每日触发。
+轻量 AI 情报采集项目:从 **GitHub Search API / Hacker News 官方 API / 官方博客 RSS / Hugging Face Daily Papers** 四类来源采集 AI 相关情报,经规则筛选、去重后全量写入 **SQLite 全表 + FTS5**,提供**规则趋势引擎**(24h/7d/30d 五态,纯规则不评分不调 LLM)与**模板日报 + 可选 Ollama 摘要 + 飞书幂等发送**。单次运行入口 `run.py`,无自建调度,由平台 autopilot 每日触发。
 
 ## 快速开始
 
@@ -91,14 +91,16 @@ ai-news-mvp/
 ```
 各源采集 → 规则筛选(字段完整/时间窗/关键词/热度,不限量)
         → 跨源去重(URL 归一化 + 标题 SimHash + 标题/摘要相似度)
-        → 每平台限量(per_platform_cap,默认 10)
-        → 趋势计算(24h/7d/30d 五态,纯规则)→ 日报生成(模板 + 可选 Ollama 摘要)→ 飞书发送(幂等)
+        → 全量入库(阶段04:去重后全部写入 SQLite,不再入库前限量)
+        → 趋势计算(24h/7d/30d 五态,纯规则)
+        → 日报候选(collect_candidates 按热度规则取 top-N,当天选了谁记 daily_reports)
+        → 日报生成(模板 + 可选 Ollama 摘要)→ 飞书发送(幂等)
 ```
 
 - **筛选**(`src/filters.py`):字段完整、时间窗口、AI 关键词命中,不做评分。
 - **去重**(`src/dedup.py`):① URL 归一化(去跟踪参数/默认端口/www);② 标题 SimHash(汉明距离 ≤ `dedup.simhash_threshold`,默认 4);③ 标题或摘要 token 集合 Jaccard 相似度 ≥ `dedup.similarity_threshold`(默认 0.8)判为重复。
 - **入库归并**(阶段03,`src/storage/db.py`):`items` 唯一键 `UNIQUE(platform, native_id)`(自然键:GitHub `full_name` / HN `hn_id` / RSS `(source_id, guid)` 无 guid 回退归一化 url / HF `arxiv_id` 回退 url);入库先按自然键精确匹配,未命中再按内容指纹 `canonical_key`(标题归一化 SimHash)近 7 天窗口模糊匹配(阈值 4),命中则合并——新来源挂 `item_sources`,标题/摘要择优,`first_seen_at` 保留最早,不拒绝;近似标题(指纹距离 > 4)不误并。
-- **限量发生在去重之后**:采集器内部不再限量,先统一跨源去重再按每平台上限截断,避免跨源重复内容各自占掉限量名额。
+- **全量入库,消费时选 top-N**(阶段04):去重后条目全部写入库(不再入库前截断);日报消费时 `collect_candidates` 按热度规则取 top-N(`highlights_cap`/`opensource_max`/`solutions_max`),当天选中 item id 记入 `daily_reports.selected_item_ids`;未入选条目保留在库供后续使用。`per_platform_cap` 仅作日报候选统计口径。
 - **每平台上限** `per_platform_cap: 10`:只是上限,允许不足 10 条。
 - **趋势**(`src/trend.py`):对项目(基于快照)与主题(基于日统计)输出五态,见下节。
 - **摘要**(`src/summarization/`):可选,只对入选「今日值得关注」的 Top 8 候选调 Ollama;失败自动降级为规则标签。
@@ -125,7 +127,7 @@ ai-news-mvp/
 | 配置项 | 默认 | 作用 |
 |---|---|---|
 | `github.api_base` | `https://api.github.com` | GitHub API 地址 |
-| `github.per_page` | 10 | 每组查询每页上限 |
+| `github.per_page` | 30 | 每组查询每页上限(search 30/min 上限内) |
 | `github.per_platform_cap` | 10 | 每平台候选上限(去重后截断) |
 | `github.sort` / `github.order` | `stars` / `desc` | 搜索排序 |
 | `github.timeout` | 30 | 单请求超时(秒) |
@@ -134,7 +136,7 @@ ai-news-mvp/
 | `github.request_interval_seconds` | 1.2 | 查询间隔(search API 30/min) |
 | `github.queries` | 3 组模板 | 查询模板列表,`{d}` 为动态日期 |
 | `hackernews.api_base` | Firebase v0 | HN 官方 API 地址 |
-| `hackernews.top_n` | 25 | topstories 取前 N 条 |
+| `hackernews.top_n` | 50 | topstories 取前 N 条 |
 | `hackernews.min_points` | 100 | 热度阈值(score) |
 | `hackernews.min_age_hours` | 2 | 过滤过新帖子(热度未聚集) |
 | `hackernews.max_age_days` | 3 | 帖子最大年龄 |
@@ -144,7 +146,7 @@ ai-news-mvp/
 | `hackernews.backoff_seconds` | 2 | 退避基数 |
 | `rss.max_age_days` | 7 | 普通博客条目最大年龄 |
 | `rss.per_platform_cap` | 10 | RSS 平台(全部博客合并)候选上限 |
-| `rss.feed_max_entries` | 30 | 超大 feed 早期截断:最多保留前 N 条 |
+| `rss.feed_max_entries` | 60 | 超大 feed 早期截断:最多保留前 N 条 |
 | `rss.feed_max_bytes` | 262144 | 超过该字节数触发截断(OpenAI feed ~785KB) |
 | `rss.timeout` | 60 | 单请求超时(秒) |
 | `rss.retries` | 2 | 失败退避重试次数 |
@@ -282,7 +284,7 @@ FTS 查询:`MATCH 'llm OR agent'` 语法,按 bm25 排序。
 三、解决方案与产品发布 (官方博客 RSS / HF 论文 + 一行精简摘要 + 链接)
 四、趋势观察       (项目/主题 + 状态 + 7d 证据;证据=事实来自库,
                     "初步判断,历史不足"=观察限制,明确标注)
-五、采集状态       (成功来源数/发现→筛选→去重→限量 分段/模型状态/失败源)
+五、采集状态       (成功来源数/发现→筛选→去重→入库 分段/模型状态/失败源)
 ```
 
 - **「今日值得关注」排序**(纯规则、不评分):新生代(创建 ≤ `report.new_days` 天)优先;老项目仅当 24h Star 增量 ≥ `report.old_repo_min_delta_24h` 或 24h 增长率 ≥ `report.old_repo_min_growth_pct` 才允许上榜;快照不足 2 天(首日)时仅新生代且近期 push(≤ `report.recent_push_days`)入选并标注「初步判断」;上榜理由基于库中真实字段(「今日新出现」「新生代(创建 N 天)」「24h Star +N(前一日 M)」等),Ollama 摘要路径同样由代码覆盖为库中事实。

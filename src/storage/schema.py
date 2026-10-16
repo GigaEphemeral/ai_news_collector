@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS daily_reports (
   generated_at TEXT,
   sent_status TEXT DEFAULT 'pending',
   sent_at TEXT,
-  retry_count INTEGER DEFAULT 0
+  retry_count INTEGER DEFAULT 0,
+  selected_item_ids TEXT       -- 阶段04:当天日报选中的 item id 列表(JSON 数组)
 );
 CREATE INDEX IF NOT EXISTS idx_items_platform ON items(platform);
 CREATE INDEX IF NOT EXISTS idx_items_published_at ON items(published_at);
@@ -185,8 +186,11 @@ def _migrate_items_v3(conn):
 
 
 def _migrate_daily_reports(conn):
-    """阶段04:给已存在的 daily_reports 表补 last_error 列(旧库无此列)。"""
-    for ddl in ('ALTER TABLE daily_reports ADD COLUMN last_error TEXT',):
+    """阶段04:给已存在的 daily_reports 表补 last_error / selected_item_ids 列。"""
+    for ddl in (
+        'ALTER TABLE daily_reports ADD COLUMN last_error TEXT',
+        'ALTER TABLE daily_reports ADD COLUMN selected_item_ids TEXT',
+    ):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

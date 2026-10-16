@@ -351,10 +351,12 @@ class TestFeishuDown:
 
 # ---------------------------------------------------------------------------
 # 6) AIQI-7 问题3:处理顺序 规则筛选 → 跨源去重 → 每平台限量
+#    阶段04(阶段03 修正):去重后全量入库,消费时(日报)再取 top-N
 # ---------------------------------------------------------------------------
 class TestPipelineOrder:
-    def test_filter_then_dedup_then_cap(self, monkeypatch, tmp_path):
-        """限量在跨源去重之后:GitHub 内部不再限量,先全量去重再按平台上限截断。"""
+    def test_filter_then_dedup_then_store_all(self, monkeypatch, tmp_path):
+        """去重在筛选之后、入库前不截断:GitHub 12 个全部入库,per_platform_cap
+        仅作日报候选统计口径(after_cap),不影响入库条数。"""
         cfg_path = make_cfg(tmp_path)
 
         # GitHub 返回 12 个仓库(超过 per_platform_cap=10),全部通过规则筛选
@@ -386,17 +388,18 @@ class TestPipelineOrder:
         assert code == 0
 
         out = _read_out_json(cfg_path, RUN_DATE)
-        # 发现 12 → 筛选 12 → 去重 12(无跨源重复)→ 限量 10(GitHub 上限)
+        # 发现 12 → 筛选 12 → 去重 12(无跨源重复)→ 入库 12(全量,不截断)
         assert out['pipeline']['discovered']['github'] == 12
         assert out['pipeline']['after_filter']['github'] == 12
         assert out['pipeline']['after_dedup'] >= 12
-        assert out['pipeline']['after_cap']['github'] == 10
+        assert out['pipeline']['after_cap']['github'] == 10   # 日报候选上限(统计)
+        assert out['pipeline']['stored']['github'] == 12      # 实际入库全量
         assert out['dedup']['input'] == 12 + 2 + 1 + 1  # GH 12 + HN 2 + RSS 1 + HF 1
         assert out['dedup']['after_dedup'] == 12 + 2 + 1 + 1
         db = _run_db(cfg_path)
         n_gh = db.conn.execute(
             "SELECT count(*) FROM items WHERE platform='github'").fetchone()[0]
-        assert n_gh == 10  # 限量后入库 10 条,而非 12
+        assert n_gh == 12  # 全量入库 12 条,而非每源 10
         db.close()
 
     def test_cross_source_similarity_dedup(self, monkeypatch, tmp_path):

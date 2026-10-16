@@ -18,7 +18,7 @@ fetching:
 
 github:
   api_base: "https://api.github.com"
-  per_page: 10                 # 每组查询每页上限(搜索 API)
+  per_page: 30                 # 每组查询每页上限(搜索 API;search 30/min 上限内)
   per_platform_cap: 10         # 每平台候选上限(在跨源去重之后执行,见 run.py 处理顺序)
   sort: "stars"
   order: "desc"
@@ -36,7 +36,7 @@ github:
 
 hackernews:
   api_base: "https://hacker-news.firebaseio.com/v0"
-  top_n: 25                    # topstories 取前 N 条
+  top_n: 50                    # topstories 取前 N 条
   min_points: 100              # 热度阈值(score)
   min_age_hours: 2             # 过新帖子热度未聚集,过滤
   max_age_days: 3              # 帖子最大年龄
@@ -48,7 +48,7 @@ hackernews:
 rss:
   max_age_days: 7              # 普通博客条目最大年龄
   per_platform_cap: 10         # RSS 平台(全部博客合并)候选上限
-  feed_max_entries: 30         # 超大 feed 早期截断:最多保留前 N 条
+  feed_max_entries: 60         # 超大 feed 早期截断:最多保留前 N 条
   feed_max_bytes: 262144       # 超过该字节数触发截断(OpenAI feed ~785KB)
   timeout: 60
   retries: 2

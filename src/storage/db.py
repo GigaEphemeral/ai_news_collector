@@ -42,26 +42,30 @@ class Database:
         return self.conn.execute(
             'SELECT * FROM daily_reports WHERE report_date=?', (report_date,)).fetchone()
 
-    def save_daily_report(self, report_date, body, generated_at=None):
+    def save_daily_report(self, report_date, body, generated_at=None,
+                          selected_item_ids=None):
         """保存/更新某日日报正文。
 
         幂等规则:已成功发送(sent)的日报不覆盖,防止重新生成覆盖"已送达"事实;
         pending/failed/uncertain 可重新生成(重置为 pending,允许从库重发)。
+        selected_item_ids: 当天日报选中的 item id 列表(阶段04,JSON 入库)。
         返回 'saved' / 'replaced' / 'skipped_sent'。
         """
         row = self.get_daily_report(report_date)
         if row and row['sent_status'] == 'sent':
             return 'skipped_sent'
         now = generated_at or utcnow_iso()
+        sel = (json.dumps(list(selected_item_ids or []), ensure_ascii=False)
+               if selected_item_ids else None)
         self.conn.execute(
             '''INSERT INTO daily_reports (report_date, body, generated_at,
-                                          sent_status, retry_count)
-               VALUES (?, ?, ?, 'pending', 0)
+                                          sent_status, retry_count, selected_item_ids)
+               VALUES (?, ?, ?, 'pending', 0, ?)
                ON CONFLICT(report_date) DO UPDATE SET
                  body=excluded.body, generated_at=excluded.generated_at,
                  sent_status='pending', sent_at=NULL, retry_count=0,
-                 last_error=NULL''',
-            (report_date, body, now))
+                 last_error=NULL, selected_item_ids=excluded.selected_item_ids''',
+            (report_date, body, now, sel))
         self.conn.commit()
         return 'replaced' if row else 'saved'
 

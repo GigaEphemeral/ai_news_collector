@@ -134,6 +134,7 @@ def collect_candidates(db, run_date, cfg, trends=None):
         if not title or not url:
             continue
         cand = {
+            'id': r['id'],  # 阶段04:item id(当天选了谁记 daily_reports)
             'name': title, 'title': title, 'url': url, 'summary': summary,
             'platform': platform, 'category': r['category'] or platform,
             'published_at': r['published_at'] or '',
@@ -256,7 +257,6 @@ def _enrich_facts(highlights, candidates, cfg):
 # 栏目构建
 # ---------------------------------------------------------------------------
 def _section1(highlights):
-    """一、今日值得关注。"""
     if not highlights:
         return [NO_HOTSPOT_TEXT]
     lines = []
@@ -348,10 +348,11 @@ def _pick_evidence(evidence):
 
 
 def _section5(stats, db, run_date, cfg, model_meta):
-    """五、采集状态:成功源数/发现→筛选→去重→限量 分段/模型状态/失败源。
+    """五、采集状态:成功源数/发现→筛选→去重→入库 分段/模型状态/失败源。
 
     阶段04修复(AIQI-7,问题3):统计口径如实分段显示(发现 → 规则筛选 → 去重 →
-    限量),不再用「去重后」掩盖中间步骤。
+    入库),不再用「去重后」掩盖中间步骤。阶段03(阶段04):去重后条目全量入库,
+    不再入库前截断;日报消费仍取 top-N(日报候选数单独标注)。
     """
     platforms = stats.get('platforms', {}) if stats else {}
     names = ('github', 'hackernews', 'rss', 'hf_papers')
@@ -365,11 +366,14 @@ def _section5(stats, db, run_date, cfg, model_meta):
     total = len(names)
     ok = total - len([p for p in failed_platforms if p in names])
 
-    # 分段统计:发现 → 规则筛选 → 去重 → 限量
+    # 分段统计:发现 → 规则筛选 → 去重 → 入库(全量),日报候选单独标注
     pipeline = (stats or {}).get('pipeline', {}) if stats else {}
     discovered = sum(int(v or 0) for v in pipeline.get('discovered', {}).values()) if pipeline else 0
     after_filter = sum(int(v or 0) for v in pipeline.get('after_filter', {}).values()) if pipeline else 0
     after_dedup = int(pipeline.get('after_dedup', 0)) if pipeline else 0
+    stored = sum(int(v or 0) for v in pipeline.get('stored', {}).values()) if pipeline else 0
+    if not stored and pipeline:
+        stored = after_dedup  # 旧 runs 无 stored 字段时回退
     after_cap = sum(int(v or 0) for v in pipeline.get('after_cap', {}).values()) if pipeline else 0
     if not discovered:  # 兼容旧 runs(无 pipeline)
         fetched = 0
@@ -387,7 +391,8 @@ def _section5(stats, db, run_date, cfg, model_meta):
                 after_dedup = len(db.items_first_seen_on(run_date.isoformat()))
             except Exception:
                 after_dedup = 0
-        after_cap = after_dedup
+        stored = after_dedup
+        after_cap = stored
 
     model = model_meta or {'status': '未调用', 'mode': 'rule'}
     model_line = model.get('status', '未调用')
@@ -411,9 +416,17 @@ def _section5(stats, db, run_date, cfg, model_meta):
         pass
     fail_text = '、'.join(fail_names) if fail_names else '无'
 
+    if stored == after_cap:
+        # 旧口径(限量=入库)或本轮候选==入库:合并显示
+        return [
+            f"成功来源:{ok}/{total} · 发现:{discovered} → 筛选:{after_filter} "
+            f"→ 去重:{after_dedup} → 入库:{stored}",
+            f"模型状态:{model_line}",
+            f"失败来源:{fail_text}",
+        ]
     return [
         f"成功来源:{ok}/{total} · 发现:{discovered} → 筛选:{after_filter} "
-        f"→ 去重:{after_dedup} → 限量:{after_cap}",
+        f"→ 去重:{after_dedup} → 入库:{stored}(日报候选 {after_cap})",
         f"模型状态:{model_line}",
         f"失败来源:{fail_text}",
     ]
@@ -451,6 +464,33 @@ def _fit(body, max_chars):
     if len(body) <= max_chars:
         return body
     return body[: max_chars - 20].rstrip() + '\n…(内容超长已截断)'
+
+
+def selected_item_ids(candidates, cfg, highlights=None):
+    """当天日报选中的 item id 列表(阶段04:消费时选 top-N 后记录)。
+
+    口径:一、今日值得关注(highlights,按 url 匹配)+ 二、开源项目(前
+    opensource_max 个 GitHub)+ 三、解决方案(前 solutions_max 个 RSS/HF)。
+    candidates 已按平台内热度/新生代排序。
+    """
+    cfg_r = cfg.get('report', {})
+    by_url = {c['url']: c.get('id') for c in candidates if c.get('id') is not None}
+    selected = set()
+    for h in (highlights or []):
+        if h.get('url') in by_url:
+            selected.add(by_url[h['url']])
+    n_os = 0
+    n_sol = 0
+    os_max = int(cfg_r.get('opensource_max', 5))
+    sol_max = int(cfg_r.get('solutions_max', 5))
+    for c in candidates:
+        if c.get('id') is None:
+            continue
+        if c['platform'] == 'github' and n_os < os_max:
+            selected.add(c['id']); n_os += 1
+        elif c['platform'] in ('rss', 'hf_papers') and n_sol < sol_max:
+            selected.add(c['id']); n_sol += 1
+    return sorted(selected)
 
 
 def build_report(db, run_date, cfg, candidates, stats=None, trends=None,

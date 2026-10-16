@@ -236,7 +236,9 @@ def main():
         'similarity_dups': deduper.similarity_dups,
     }
 
-    # 4b) 每平台限量(跨源去重之后):GitHub 按 report.sort_by(新生代优先)排序后取上限
+    # 4b) 阶段04(阶段03 修正):去重后条目全量入库,不再入库前截断。
+    #     消费时(collect_candidates / 日报栏目)再按热度规则取 top-N。
+    #     after_cap 仅作统计:日报候选每平台上限(消费口径),不影响入库。
     caps = {
         'github': int(cfg['github']['per_platform_cap']),
         'hackernews': int(cfg['hackernews']['per_platform_cap']),
@@ -248,13 +250,12 @@ def main():
     for platform in ('github', 'hackernews', 'rss', 'hf_papers'):
         items = [it for it in deduped if it['platform'] == platform]
         if platform == 'github' and items:
+            # 仅排序保证入库顺序与消费排序一致(便于调试);不做截断
             from src.pipeline.ranking import github_entry_sort_key
             cfg_r = cfg.get('report', {})
             items.sort(key=lambda it: github_entry_sort_key(it, cfg_r, run_date, db))
-        # 非 GitHub 平台保持各自采集器/规则过滤后的顺序(热度/时间),只截断
-        items = items[:caps[platform]]
-        after_cap[platform] = len(items)
-        stored_items.extend(items)
+        after_cap[platform] = min(len(items), caps[platform])  # 统计口径:日报候选上限
+        stored_items.extend(items)  # 全量入库,不截断
     stats['pipeline'] = {
         'discovered': {p: int((stats['platforms'].get(p) or {}).get('fetched_raw')
                               or (stats['platforms'].get(p) or {}).get('fetched') or 0)
@@ -262,6 +263,8 @@ def main():
         'after_filter': {p: len(per_platform[p]) for p in caps},
         'after_dedup': len(deduped),
         'after_cap': after_cap,
+        'stored': {p: len([it for it in stored_items if it['platform'] == p])
+                   for p in caps},
     }
 
     # ---------- 5) 写 SQLite 全表 + 快照 + 主题统计 + 趋势 ----------
@@ -405,7 +408,8 @@ def main():
           f",发现 {sum(stats['pipeline']['discovered'].values())} → "
           f"筛选 {sum(stats['pipeline']['after_filter'].values())} → "
           f"去重 {stats['pipeline']['after_dedup']} → "
-          f"限量 {sum(stats['pipeline']['after_cap'].values())} 条")
+          f"入库 {sum(stats['pipeline']['stored'].values())} 条")
+    return None
 
 
 def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
@@ -413,7 +417,8 @@ def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
 
     返回 build_report() 的 dict(含 body / validation / highlights / model_meta)。
     """
-    from src.reporting.report import build_report, collect_candidates, rule_highlights
+    from src.reporting.report import (build_report, collect_candidates,
+                                      rule_highlights, selected_item_ids)
     from src.summarization.news_summarizer import summarize_or_fallback
 
     candidates = collect_candidates(db, run_date, cfg, trends)
@@ -427,8 +432,11 @@ def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
         highlights, model_meta = summarize_or_fallback(model_input, cfg)
     data = build_report(db, run_date, cfg, candidates, stats=stats, trends=trends,
                         highlights=highlights, model_meta=model_meta)
-    saved = db.save_daily_report(run_date, data['body'])
+    # 阶段04:当天选了谁记 daily_reports(消费时选 top-N 后记录选中 item id)
+    sel_ids = selected_item_ids(candidates, cfg, highlights)
+    saved = db.save_daily_report(run_date, data['body'], selected_item_ids=sel_ids)
     data['saved_to_db'] = saved
+    data['selected_item_ids'] = sel_ids
     issues = data.get('validation') or []
     if issues:
         print(f"[WARN] 日报校验未完全通过: {'; '.join(issues)}")

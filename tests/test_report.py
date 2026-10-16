@@ -322,7 +322,7 @@ def test_section3_fetch_summary_config_effect(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AIQI-7 问题3:采集状态分段显示(发现 → 筛选 → 去重 → 限量)
+# AIQI-7 问题3:采集状态分段显示(发现 → 筛选 → 去重 → 入库)
 # ---------------------------------------------------------------------------
 def test_section5_segmented_stats():
     db = _seed(_make_db())
@@ -335,7 +335,8 @@ def test_section5_segmented_stats():
         'pipeline': {'discovered': {'github': 29, 'hackernews': 25, 'rss': 1036, 'hf_papers': 5},
                      'after_filter': {'github': 4, 'hackernews': 1, 'rss': 2, 'hf_papers': 1},
                      'after_dedup': 8,
-                     'after_cap': {'github': 2, 'hackernews': 1, 'rss': 2, 'hf_papers': 1}},
+                     'after_cap': {'github': 2, 'hackernews': 1, 'rss': 2, 'hf_papers': 1},
+                     'stored': {'github': 2, 'hackernews': 1, 'rss': 2, 'hf_papers': 1}},
         'dedup': {'after_dedup': 8},
     }
     data = build_report(db, RUN_DATE, mini_cfg(), cands, stats=stats)
@@ -343,5 +344,5 @@ def test_section5_segmented_stats():
     assert '发现:1095' in sec5
     assert '筛选:8' in sec5
     assert '去重:8' in sec5
-    assert '限量:6' in sec5
+    assert '入库:6' in sec5
     db.close()
