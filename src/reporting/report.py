@@ -19,6 +19,7 @@
 """
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from ..storage.db import utcnow_iso
@@ -33,6 +34,7 @@ SECTION_TITLES = [
     '三、解决方案与产品发布',
     '四、趋势观察',
     '五、采集状态',
+    '六、其他资讯汇总',
 ]
 
 NO_HOTSPOT_TEXT = '今日没有符合筛选条件的新热点'
@@ -140,6 +142,8 @@ def collect_candidates(db, run_date, cfg, trends=None):
             'published_at': r['published_at'] or '',
             'stars': None, 'stars_24h': None, 'created_days': None,
             'topics': [], 'tags': [], 'score': 0.0,
+            'extra': extra,  # 阶段06:content_fetcher 取 HN 讨论文字 / HF 热度等
+            'content_hash': r['content_hash'],  # 阶段06:GitHub README 缓存键
         }
         if platform == 'github':
             full = extra.get('full_name') or title
@@ -170,15 +174,51 @@ def collect_candidates(db, run_date, cfg, trends=None):
                 cand['score'] = (pub - datetime(run_date.year, run_date.month, run_date.day,
                                                 tzinfo=timezone.utc)).total_seconds()
             cand['tags'] = rule_tags(cand, cfg)
+            # 阶段05:热度分层(消费时规则,不落库)
+            #   层1 有真实热度:HF upvotes+stars / 跨源命中 HN 用 points
+            #   层2 无信号但 source_count≥2(重复度高)
+            #   层3 其余 → 按(新鲜度,关键词权重)
+            cand['heat_layer'] = 3
+            cand['heat_signal'] = 0
+            cand['source_count'] = 1
+            cand['keyword_hits'] = _keyword_hits(f"{title} {summary}", cfg)
+            if platform == 'hf_papers':
+                up = extra.get('upvotes') or 0
+                gs = extra.get('github_stars') or 0
+                if up or gs:
+                    cand['heat_layer'] = 1
+                    cand['heat_signal'] = int(up) + int(gs)
+            else:  # rss
+                try:
+                    src_stats = db.item_source_stats(r['id'])
+                    cand['source_count'] = src_stats['source_count'] or 1
+                    if src_stats['hn_points']:
+                        cand['heat_layer'] = 1
+                        cand['heat_signal'] = int(src_stats['hn_points'])
+                    elif cand['source_count'] >= 2:
+                        cand['heat_layer'] = 2
+                except Exception:
+                    pass
         candidates.append(cand)
 
-    # 平台内排序:GitHub 按 report.sort_by(默认新生代优先)排序;其他平台按指标降序。
+    # 平台内排序:GitHub 按 report.sort_by(默认新生代优先)排序;RSS/HF 按热度分层;
     # 全局按平台优先级(github → hackernews → rss/hf)保序。
+    from ..pipeline.ranking import rss_hf_heat_sort_key
     order = {'github': 0, 'hackernews': 1, 'rss': 2, 'hf_papers': 3}
     candidates.sort(key=lambda c: ((0, *github_sort_key(c, cfg_r))
                                    if c['platform'] == 'github'
-                                   else (order.get(c['platform'], 9), -c['score'])))
+                                   else ((1, -c['score']) if c['platform'] == 'hackernews'
+                                         else (order.get(c['platform'], 9), *rss_hf_heat_sort_key(c, cfg)))))
     return candidates
+
+
+def _keyword_hits(text, cfg):
+    """文本命中 AI 关键词数(阶段05 热度分层 层3 用)。"""
+    kws = cfg.get('keywords', {}).get('ai', []) or []
+    if not text:
+        return 0
+    low = (text or '').lower()
+    return sum(1 for kw in kws if kw and kw in low)
 
 
 def _facts_line(cand):
@@ -444,6 +484,23 @@ def _platform_display_name(key, cfg):
     return key
 
 
+def _section6(candidates, cfg_r, selected_urls):
+    """六、其他资讯汇总(阶段05):未入选 top-N 的 RSS/HF 条目简单聚合。
+
+    每行:标题 + 来源 + 一句话分类(平台/标签/关键词),不丢弃未入选条目。
+    """
+    sel = set(selected_urls or [])
+    lines = []
+    for c in candidates:
+        if c['platform'] not in ('rss', 'hf_papers'):
+            continue
+        if c['url'] in sel:
+            continue  # 已入选三、解决方案,不重复
+        tag = '、'.join(c['tags']) if c.get('tags') else c['platform']
+        lines.append(f"- {c['title'][:80]} [{tag}] · {c['url']}")
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # 汇总与校验
 # ---------------------------------------------------------------------------
@@ -516,12 +573,16 @@ def build_report(db, run_date, cfg, candidates, stats=None, trends=None,
     highlights = _enrich_facts(highlights, candidates, cfg)
     resume_map = _build_resume_map(candidates, cfg)
 
+    # 六、其他资讯汇总:排除已入选三、解决方案的 top-N RSS/HF 条目
+    sol_urls = [c['url'] for c in candidates
+                if c['platform'] in ('rss', 'hf_papers')][:int(cfg_r.get('solutions_max', 5))]
     sections = {
         1: _section1(highlights),
         2: _section2(candidates, cfg_r),
         3: _section3(candidates, cfg_r, resume_map),
         4: _section4(trends, cfg_r, run_date),
         5: _section5(stats, db, run_date, cfg, model_meta),
+        6: _section6(candidates, cfg_r, sol_urls),
     }
 
     kw = _keyword(cfg)
@@ -592,3 +653,183 @@ def _build_resume_map(candidates, cfg):
     except Exception as e:
         log.warning(f'解决方案摘要生成失败,回退到库中 summary: {e}')
         return {}  # 回退:由 _section3 显示库中已有 summary 或注明理由
+
+
+# ---------------------------------------------------------------------------
+# 阶段06 [04]:candidates.json + draft(占位符)
+# ---------------------------------------------------------------------------
+def build_draft_with_placeholders(candidates, cfg, highlights=None,
+                                  stats=None, trends=None):
+    """生成带占位符的日报草稿(阶段06)。
+
+    占位符:
+      {{INTRO_Hx}} / {{INTRO_Ox}} / {{INTRO_Sx}}  每个唯一、与条目一一对应
+      {{MODEL_STATUS}}                            单占位(模型状态文案)
+    其余栏目(趋势/采集状态/其他资讯汇总)由脚本生成,agent 不改。
+
+    返回 dict:
+      body(草稿文本)/ placeholders(占位符→条目 url 映射)/ sections
+    """
+    cfg_r = cfg.get('report', {})
+    highlights = highlights if highlights is not None else rule_highlights(candidates, cfg)
+    highlights = _enrich_facts(highlights, candidates, cfg)
+    resume_map = _build_resume_map(candidates, cfg)
+
+    # ---- 1) 今日值得关注(H):每个 highlight 一个占位符 ----
+    h_lines = []
+    h_map = {}
+    for i, h in enumerate(highlights, 1):
+        ph = f'{{{{INTRO_H{i}}}}}'
+        h_map[ph] = h['url']
+        h_lines.append(f'{i}. {h["name"]}')
+        h_lines.append(f'   {ph}')
+        reason = h.get('reason') or ''
+        facts = h.get('facts') or ''
+        h_lines.append(f'   依据:{reason} · 事实:{facts} · 原文:{h["url"]}')
+
+    # ---- 2) 开源项目(O):前 opensource_max 个 GitHub,每个一个占位符 ----
+    from ..pipeline.ranking import github_sort_key
+    gh = [c for c in candidates if c['platform'] == 'github']
+    gh.sort(key=lambda c: github_sort_key(c, cfg_r))
+    gh = gh[:int(cfg_r.get('opensource_max', 5))]
+    o_lines, o_map = [], {}
+    for i, c in enumerate(gh, 1):
+        ph = f'{{{{INTRO_O{i}}}}}'
+        o_map[ph] = c['url']
+        state = next((t for t in c['tags'] if t in STATE_ORDER), None)
+        tag = f'[{state}]' if state else ''
+        facts = _facts_line(c)
+        o_lines.append(f'- {c["name"]} {tag} — {ph} · {facts} · GitHub:{c["url"]}')
+
+    # ---- 3) 解决方案(S):前 solutions_max 个 RSS/HF,每个一个占位符 ----
+    sol = [c for c in candidates if c['platform'] in ('rss', 'hf_papers')]
+    sol = sol[:int(cfg_r.get('solutions_max', 5))]
+    s_lines, s_map = [], {}
+    for i, c in enumerate(sol, 1):
+        ph = f'{{{{INTRO_S{i}}}}}'
+        s_map[ph] = c['url']
+        tag = '、'.join(c['tags']) if c['tags'] else c['category']
+        res = (resume_map or {}).get(c['url']) or {}
+        summary = res.get('summary') or _clamp(c['summary'], int(cfg_r.get('summary_max_chars', 80)))
+        if not summary:
+            summary = res.get('reason') or '原文未提供摘要'
+        s_lines.append(f'- {c["title"]} [{tag}] — {ph} · {summary} · {c["url"]}')
+
+    # ---- 4) 其余栏目脚本生成 ----
+    t_lines = _section4(trends, cfg_r, parse_date(cfg.get('_date'))
+                        if cfg.get('_date') else None) if trends else []
+    sec5 = _section5(stats, None, cfg.get('_date'), cfg, None) if stats else []
+    sol_urls = [c['url'] for c in sol]
+    sec6 = _section6(candidates, cfg_r, sol_urls)
+
+    kw = _keyword(cfg)
+    date_str = cfg.get('_date') or datetime.now(timezone.utc).date().isoformat()
+    title = f"{kw} · AI 情报日报 {date_str}"
+    lines = [title, '采集窗口:过去 24 小时 · 历史趋势:过去 7 天', '']
+    lines.append('一、今日值得关注')
+    lines.extend(h_lines or [NO_HOTSPOT_TEXT])
+    lines.append('')
+    lines.append('二、开源项目与工程实践')
+    lines.extend(o_lines or [EMPTY_SECTION_TEXT])
+    lines.append('')
+    lines.append('三、解决方案与产品发布')
+    lines.extend(s_lines or [EMPTY_SECTION_TEXT])
+    lines.append('')
+    lines.append('四、趋势观察')
+    lines.extend(t_lines or [EMPTY_SECTION_TEXT])
+    lines.append('')
+    lines.append('五、采集状态')
+    lines.extend(sec5 or [EMPTY_SECTION_TEXT])
+    lines.append('')
+    lines.append('六、其他资讯汇总')
+    lines.extend(sec6 or [EMPTY_SECTION_TEXT])
+    lines.append('')
+    lines.append(f'模型状态:{{{{MODEL_STATUS}}}}')
+    body = '\n'.join(lines).rstrip() + '\n'
+
+    placeholders = {}
+    placeholders.update(h_map)
+    placeholders.update(o_map)
+    placeholders.update(s_map)
+    placeholders['{{MODEL_STATUS}}'] = ''
+    return {
+        'body': body,
+        'placeholders': placeholders,
+        'sections': {'H': h_map, 'O': o_map, 'S': s_map},
+    }
+
+
+def export_candidates_json(candidates, cfg, draft_report_path=None,
+                           stats=None, trends=None, highlights=None,
+                           content_map=None):
+    """导出 candidates.json(阶段06)→ data/ai_news_mvp_candidates_YYYYMMDD.json。
+
+    schema_version=1;items 每条带 placeholder/section/url/title/platform/facts/
+    reason/content/content_source/fallback_intro。
+    """
+    cfg_r = cfg.get('report', {})
+    highlights = highlights if highlights is not None else rule_highlights(candidates, cfg)
+    highlights = _enrich_facts(highlights, candidates, cfg)
+    content_map = content_map or {}
+    by_url = {h['url']: h for h in highlights}
+
+    items = []
+    ph_counter = {'H': 0, 'O': 0, 'S': 0}
+    for c in candidates:
+        section = None
+        if c['platform'] == 'github':
+            section = 'O'
+        elif c['platform'] in ('rss', 'hf_papers'):
+            section = 'S'
+        else:
+            section = 'H'
+        if section in ('O', 'S'):
+            ph_counter[section] += 1
+            placeholder = f'{{{{INTRO_{section}{ph_counter[section]}}}}}'
+            facts = _facts_line(c)
+            reason = selection_reason_for(c, cfg_r)
+        else:
+            h = by_url.get(c['url'])
+            if h is None:
+                continue
+            ph_counter[section] += 1
+            placeholder = f'{{{{INTRO_{section}{ph_counter[section]}}}}}'
+            facts = h.get('facts', '')
+            reason = h.get('reason', '')
+        content = (content_map.get(c['url']) or {}).get('content', '') or (c.get('summary') or '')
+        items.append({
+            'placeholder': placeholder,
+            'section': section,
+            'url': c['url'],
+            'title': c.get('title', ''),
+            'platform': c.get('platform', ''),
+            'facts': facts,
+            'reason': reason,
+            'content': content,
+            'content_source': (content_map.get(c['url']) or {}).get('content_source', ''),
+            'fallback_intro': (content_map.get(c['url']) or {}).get('fallback_intro', ''),
+        })
+
+    kw = _keyword(cfg)
+    date_str = cfg.get('_date') or datetime.now(timezone.utc).date().isoformat()
+    out = {
+        'schema_version': 1,
+        'date': date_str,
+        'draft_report_path': draft_report_path or '',
+        'keyword': kw,
+        'stats': stats or {},
+        'items': items,
+        'trends': trends or {},
+    }
+    data_dir = cfg.get('_data_dir') or os.path.join(cfg.get('_project_root', ''), 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, f'ai_news_mvp_candidates_{date_str.replace("-", "")}.json')
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+    return path, out
+
+
+def selection_reason_for(cand, cfg_r):
+    """candidates.json 用上榜理由(避免顶层重复 import)。"""
+    from ..pipeline.ranking import selection_reason
+    return selection_reason(cand, cfg_r)

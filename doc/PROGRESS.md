@@ -3,6 +3,4 @@
 > 规则：本文件只列待办事项；每个阶段完成且测试验收通过后，**删除**对应条目（不保留 done 历史）。
 > 验收标准见 issue AIQI-18 描述中各阶段「验收」小节。
 
-- [ ] 阶段 5：RSS/HF 热度分层 + 「其他资讯汇总」段（HF `extra` 补采、RSS 三层热度规则、脚本侧聚合未入选条目）
-- [ ] 阶段 6：[04] 脚本抓详情 + candidates/draft 输出（`summarize.fetch_contents` 并发 4、GitHub README 详情 7 天缓存、`build_draft_with_placeholders`、`export_candidates_json`）
-- [ ] 阶段 7：[05] agent_readme.md + 占位符渲染 + 端到端走查（agent 参数、失败兜底、`src.tools.check_draft` 自检、README Agent 模式入口）
+（阶段 2–7 已全部完成：仓库自包含与领域拆分、唯一 key 跨源归并、全量入库消费选 top-N、RSS/HF 热度分层与汇总段、candidates/draft 输出、agent_readme 与端到端渲染。无待办事项。）

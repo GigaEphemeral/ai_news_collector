@@ -211,3 +211,41 @@ def test_native_id_from_collectors():
     # HF: arxiv_id
     assert _native_id_for({'id': 4, 'category': 'papers'},
                           {'url': 'https://huggingface.co/papers/2401.12345', 'link': ''}) == '2401.12345'
+
+
+def test_item_sources_fk_repair_after_old_migration():
+    """回归:阶段03 早期迁移把 item_sources FK 改写为 items_old(已删表),
+    再次打开库时应自动修复 FK 指向 items,upsert_item 不报错。"""
+    import os
+    d = tempfile.mkdtemp(prefix='ai_news_mvp_test_')
+    path = os.path.join(d, 'repair.sqlite3')
+    import sqlite3
+    conn = sqlite3.connect(path)
+    conn.executescript('''
+      CREATE TABLE sources (id INTEGER PRIMARY KEY, url TEXT UNIQUE NOT NULL, name TEXT,
+        category TEXT, enabled INTEGER DEFAULT 1, last_fetch_at TEXT, last_error TEXT,
+        created_at TEXT DEFAULT (datetime('now')));
+      CREATE TABLE items (id INTEGER PRIMARY KEY, source_id INTEGER, platform TEXT,
+        native_id TEXT, title TEXT NOT NULL, url TEXT NOT NULL, summary TEXT,
+        published_at TEXT, content_hash INTEGER, canonical_key INTEGER, category TEXT,
+        extra TEXT, first_seen_at TEXT, last_seen_at TEXT,
+        UNIQUE (platform, native_id));
+      CREATE TABLE item_sources (item_id INTEGER REFERENCES "items_old"(id) ON DELETE CASCADE,
+        source_id INTEGER REFERENCES sources(id), source_url TEXT, seen_at TEXT,
+        PRIMARY KEY (item_id, source_id));
+    ''')
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    sql = db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='item_sources'"
+    ).fetchone()['sql']
+    assert 'items_old' not in sql, 'item_sources FK 应被修复指向 items'
+    sid = db.upsert_source('hackernews:topstories', 'HN', 'hackernews')
+    _, iid = db.upsert_item(platform='hackernews', title='T', url='https://hn/i',
+                            summary='', published_at=None, content_hash=1,
+                            category='discussion', extra={}, source_id=sid,
+                            source_url='hackernews:topstories', native_id='1')
+    assert db.conn.execute(
+        'SELECT count(*) n FROM item_sources WHERE item_id=?', (iid,)).fetchone()['n'] == 1
+    db.close()

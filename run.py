@@ -60,6 +60,10 @@ def parse_args():
                     help='发送 --date 对应日报(只读库,不采集;当日已成功发送则跳过)')
     ap.add_argument('--no-summarize', action='store_true',
                     help='跳过 Ollama 摘要,用原标题+规则标签生成"今日值得关注"')
+    ap.add_argument('--emit-candidates', action='store_true', default=True,
+                    help='阶段06:产出 candidates.json + draft(默认开;--no-emit-candidates 关闭)')
+    ap.add_argument('--no-emit-candidates', action='store_true',
+                    help='关闭 candidates/draft 产出')
     return ap.parse_args()
 
 
@@ -351,6 +355,18 @@ def main():
             except Exception as e:
                 stats.setdefault('report', {})['send_error'] = str(e)
                 print(f'[FAIL] 日报发送失败: {e}')
+        # 阶段06:产出 candidates.json + draft(默认开;纯 --send 模式不产出)
+        if (not args.send or args.report) and not args.no_emit_candidates:
+            try:
+                emit = emit_candidates_and_draft(
+                    db, run_date, cfg, stats, trends, data_dir,
+                    no_summarize=args.no_summarize or bool(args.report))
+                stats['emit'] = emit
+                print(f"[emit] candidates: {emit.get('candidates_path')}")
+                print(f"[emit] draft: {emit.get('draft_path')}")
+            except Exception as e:
+                stats['emit'] = {'error': str(e)}
+                print(f'[WARN] candidates/draft 产出失败: {e}')
         db.close()
 
     # ---------- 6) 输出 ----------
@@ -441,6 +457,43 @@ def build_and_save_report(db, run_date, cfg, stats, trends, no_summarize=False):
     if issues:
         print(f"[WARN] 日报校验未完全通过: {'; '.join(issues)}")
     return data
+
+
+def emit_candidates_and_draft(db, run_date, cfg, stats, trends, data_dir,
+                              no_summarize=True):
+    """阶段06:产出 candidates.json + draft(占位符)。
+
+    - collect_candidates 按热度规则取 top-N;
+    - fetch_contents 并发抓详情(GitHub README 7 天缓存,不 clone);
+    - build_draft_with_placeholders 生成 {{INTRO_Hx/Ox/Sx}} + {{MODEL_STATUS}} 占位草稿;
+    - export_candidates_json 写 data/ai_news_mvp_candidates_YYYYMMDD.json。
+
+    返回 {candidates_path, draft_path, n_items, n_placeholders}。
+    """
+    from src.reporting.report import (build_draft_with_placeholders, collect_candidates,
+                                      export_candidates_json, rule_highlights)
+    from src.summarization.content_fetcher import fetch_contents
+
+    cfg = dict(cfg)
+    cfg['_date'] = run_date
+    cfg['_data_dir'] = data_dir
+    candidates = collect_candidates(db, run_date, cfg, trends)
+    highlights = rule_highlights(candidates, cfg)
+    content_map = fetch_contents(candidates, cfg, workers=4, timeout=15)
+    draft = build_draft_with_placeholders(candidates, cfg, highlights=highlights,
+                                          stats=stats, trends=trends)
+    draft_path = os.path.join(data_dir, f'ai_news_mvp_draft_{run_date.replace("-", "")}.txt')
+    with open(draft_path, 'w', encoding='utf-8') as f:
+        f.write(draft['body'])
+    candidates_path, out = export_candidates_json(
+        candidates, cfg, draft_report_path=draft_path, stats=stats,
+        trends=trends, highlights=highlights, content_map=content_map)
+    return {
+        'candidates_path': candidates_path,
+        'draft_path': draft_path,
+        'n_items': len(out.get('items', [])),
+        'n_placeholders': len(draft.get('placeholders', {})),
+    }
 
 
 def _platform_level(stat):

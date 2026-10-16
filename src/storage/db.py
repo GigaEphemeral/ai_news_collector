@@ -27,6 +27,23 @@ def match_keywords(text, keywords):
     return [kw for kw in (keywords or []) if kw and kw in lower]
 
 
+def _merge_extra(existing, new):
+    """合并两 extra JSON(阶段05:跨源归并保留双方热度信号)。
+
+    新值优先但旧值有而新值没有的字段保留;HN points / HF upvotes+stars 等
+    热度字段不因先入库的 RSS 而被丢弃。
+    """
+    try:
+        old = json.loads(existing or '{}')
+    except (ValueError, TypeError):
+        old = {}
+    if not isinstance(old, dict):
+        old = {}
+    merged = dict(old)
+    merged.update(new or {})
+    return json.dumps(merged, ensure_ascii=False)
+
+
 class Database:
     def __init__(self, db_path):
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
@@ -177,20 +194,21 @@ class Database:
             self.conn.commit()
             return 'inserted', item_id
 
-        # 3) 合并:标题/摘要择优(取较长),first_seen 保留最早
+        # 3) 合并:标题/摘要择优(取较长),first_seen 保留最早,extra 字段合并
+        #    (阶段05:跨源归并时保留双方热度信号——HN points / HF upvotes+stars)
         item_id = row['id']
         new_title = title if len(title or '') >= len(row['title'] or '') else row['title']
         new_summary = (summary if len(summary or '') >= len(row['summary'] or '')
                        else row['summary'])
         earliest = min(fsa, row['first_seen_at'] or fsa)
+        merged_extra = _merge_extra(row['extra'], extra)
         self.conn.execute(
             '''UPDATE items SET source_id=COALESCE(source_id, ?), title=?, summary=?,
                  first_seen_at=?, last_seen_at=?, canonical_key=COALESCE(?, canonical_key),
-                 extra=COALESCE(?, extra)
+                 extra=?
                WHERE id=?''',
             (source_id, new_title, new_summary, earliest, now,
-             canonical_key, json.dumps(extra or {}, ensure_ascii=False) if extra else None,
-             item_id),
+             canonical_key, merged_extra, item_id),
         )
         self._attach_source(item_id, source_id, source_url, now)
         self.conn.commit()
@@ -228,6 +246,29 @@ class Database:
                  source_url=excluded.source_url, seen_at=excluded.seen_at''',
             (item_id, source_id, source_url or '', seen_at),
         )
+
+    def item_source_stats(self, item_id):
+        """某条目跨源信息(阶段05 热度分层用):
+        返回 {'source_count': n, 'has_hn': bool, 'hn_points': int|None}。
+
+        hn_points: item_sources 命中 HN 且该条目(或同 url 条目)extra 含 points 时取值。
+        """
+        row = self.conn.execute(
+            'SELECT count(*) n, sum(CASE WHEN source_url LIKE \'hackernews%\' THEN 1 ELSE 0 END) hn '
+            'FROM item_sources WHERE item_id=?', (item_id,)).fetchone()
+        source_count = int(row['n'] or 0)
+        has_hn = int(row['hn'] or 0) > 0
+        hn_points = None
+        if has_hn:
+            it = self.conn.execute(
+                'SELECT extra FROM items WHERE id=?', (item_id,)).fetchone()
+            if it:
+                try:
+                    ex = json.loads(it['extra'] or '{}')
+                    hn_points = ex.get('points')
+                except (ValueError, TypeError):
+                    hn_points = None
+        return {'source_count': source_count, 'has_hn': has_hn, 'hn_points': hn_points}
 
     def count_items(self):
         return self.conn.execute('SELECT count(*) FROM items').fetchone()[0]

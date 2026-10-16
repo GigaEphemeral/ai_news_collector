@@ -54,8 +54,11 @@ def make_cfg(tmp_path, *, feeds=False):
 
 
 def _argv(cfg_path, *args):
-    """构建 argv,强制带 --config 隔离到临时配置(绝不碰真实 config/DB)。"""
-    return ['run.py', '--config', cfg_path] + list(args)
+    """构建 argv,强制带 --config 隔离到临时配置(绝不碰真实 config/DB)。
+
+    默认 --no-emit-candidates:阶段06 的 candidates/draft 产出有单独集成测试,
+    这里只验证采集/入库/日报稳定性,避免并发抓详情拖慢测试。"""
+    return ['run.py', '--config', cfg_path, '--no-emit-candidates'] + list(args)
 
 
 def _run(monkeypatch, argv):

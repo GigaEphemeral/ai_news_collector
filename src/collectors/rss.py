@@ -213,6 +213,16 @@ def fetch_rss_and_hf(cfg):
                     #   RSS: (source_id, guid),无 guid 回退归一化 url
                     #   HF : arxiv_id(从 huggingface.co/papers/{id} 提取),回退 url
                     e['native_id'] = _native_id_for(fc, e)
+                    # 阶段05: HF 热度字段补采(原在 orig_entry 里,入库时丢失)
+                    if fc['category'] == 'papers':
+                        paper = ((e.get('orig_entry') or {}).get('paper') or {})
+                        e['extra'] = {
+                            'arxiv_id': paper.get('id') or e['native_id'],
+                            'upvotes': paper.get('upvotes') or 0,
+                            'github_stars': paper.get('githubStars') or 0,
+                            'github_repo': paper.get('githubRepo') or '',
+                            'is_hf_papers': True,
+                        }
                     entries.append(e)
                 results[fc['name']] = entries
             except Exception as exc:

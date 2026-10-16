@@ -170,6 +170,15 @@ ollama:
   temperature: 0.2
   min_output_items: 3            # 模型有效输出下限(低于则整体降级)
   max_output_items: 5            # 模型输出条数上限
+  # 阶段07:agent 模式参数(占位符渲染;agent_readme.md 与调用模板一致)
+  agent:
+    temperature: 0.1             # 低温度,按模板稳定输出
+    num_predict: 512             # 每批 ≤4 条,给足但不过度
+    think: false
+    format: json
+    num_ctx: 4096                # 上下文窗口(含 system + 输入数据)
+    repeat_penalty: 1.05         # 防重复输出
+    max_batch: 4                 # 每批最多条目数(硬性规则:分批 ≤4 条)
 
 feishu:
   timeout: 30                    # 单次 POST 超时(秒)

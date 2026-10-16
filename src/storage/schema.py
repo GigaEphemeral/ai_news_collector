@@ -154,21 +154,68 @@ CREATE INDEX IF NOT EXISTS idx_items_first_seen ON items(first_seen_at);
 """
 
 
+# item_sources 相关索引(迁移重建用;与 SCHEMA 保持一致)
+ITEM_SOURCES_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_item_sources_item ON item_sources(item_id);
+"""
+
+# 阶段03:item_sources 重建(迁移用,引用新的 items 表)
+ITEM_SOURCES_V3 = """
+CREATE TABLE item_sources (
+  item_id INTEGER REFERENCES items(id) ON DELETE CASCADE,
+  source_id INTEGER REFERENCES sources(id),
+  source_url TEXT,
+  seen_at TEXT,
+  PRIMARY KEY (item_id, source_id)
+);
+"""
+
+
 def _items_needs_v3_migration(conn):
     """旧 items 表缺 native_id 列 → 需要重建迁移。"""
     cols = {r['name'] for r in conn.execute('PRAGMA table_info(items)')}
     return 'native_id' not in cols
 
 
+def _item_sources_needs_repair(conn):
+    """阶段03 早期迁移遗留:item_sources 的 FK 指向已被删除的 items_old。
+
+    SQLite 在 ALTER TABLE items RENAME 时会把其他表对该表的 REFERENCES
+    一并改写为 items_old;若旧迁移没重建 item_sources,这里检测并修复。"""
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='item_sources'").fetchone()
+    return sql is not None and 'items_old' in (sql['sql'] or '')
+
+
+def _repair_item_sources(conn):
+    """重建 item_sources,使 FK 指向新的 items 表(保留数据)。"""
+    conn.execute('PRAGMA foreign_keys=OFF')
+    try:
+        conn.execute('ALTER TABLE item_sources RENAME TO item_sources_old')
+        conn.executescript(ITEM_SOURCES_V3)
+        conn.execute(
+            '''INSERT INTO item_sources (item_id, source_id, source_url, seen_at)
+               SELECT item_id, source_id, source_url, seen_at FROM item_sources_old''')
+        conn.execute('DROP TABLE item_sources_old')
+        conn.executescript(ITEM_SOURCES_INDEXES)
+        conn.commit()
+        logging.info('item_sources FK 已修复(指向 items_old → items)')
+    finally:
+        conn.execute('PRAGMA foreign_keys=ON')
+
+
 def _migrate_items_v3(conn):
     """把旧 items(url UNIQUE)重建为新结构(native_id 回退为 url)。
 
     rename items 会触发 SQLite 重写其他表(如 item_sources)对 items 的
-    FK 引用,因此迁移期间关闭外键,结束后恢复。"""
+    FK 引用(指向 items_old),因此 item_sources 也一并重建;迁移期间关闭
+    外键,结束后恢复。"""
     conn.execute('PRAGMA foreign_keys=OFF')
     try:
+        conn.execute('ALTER TABLE item_sources RENAME TO item_sources_old')
         conn.execute('ALTER TABLE items RENAME TO items_old')
         conn.executescript(ITEMS_V3)
+        conn.executescript(ITEM_SOURCES_V3)
         conn.execute(
             '''INSERT INTO items (id, source_id, platform, native_id, title, url, summary,
                                   published_at, content_hash, canonical_key, category, extra,
@@ -176,9 +223,14 @@ def _migrate_items_v3(conn):
                SELECT id, source_id, platform, url, title, url, summary,
                       published_at, content_hash, NULL, category, extra,
                       first_seen_at, last_seen_at FROM items_old''')
+        conn.execute(
+            '''INSERT INTO item_sources (item_id, source_id, source_url, seen_at)
+               SELECT item_id, source_id, source_url, seen_at FROM item_sources_old''')
         conn.execute('DROP TABLE items_old')
+        conn.execute('DROP TABLE item_sources_old')
         # 旧表 rename 时索引随之改名,重建新表索引
         conn.executescript(ITEMS_INDEXES)
+        conn.executescript(ITEM_SOURCES_INDEXES)
         conn.commit()
     finally:
         conn.execute('PRAGMA foreign_keys=ON')
@@ -206,6 +258,9 @@ def ensure_schema(conn):
     if _items_needs_v3_migration(conn):
         _drop_fts(conn)
         _migrate_items_v3(conn)
+    elif _item_sources_needs_repair(conn):
+        # 阶段03 早期迁移遗留:item_sources FK 指向已删除的 items_old
+        _repair_item_sources(conn)
     _migrate_daily_reports(conn)
     return _setup_fts(conn)
 

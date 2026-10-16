@@ -140,6 +140,27 @@ def github_entry_sort_key(entry, cfg_r, run_date, db=None):
                             'stars': stars, 'pushed_days': pushed_days}, cfg_r)
 
 
+def rss_hf_heat_sort_key(cand, cfg):
+    """RSS/HF 候选热度分层排序键(阶段05:消费时规则,不落库)。
+
+    三层:
+      层1 有真实热度:HF upvotes+stars / 跨源命中 HN 用 points → 按信号降序
+      层2 无信号但 source_count≥2(重复度高)→ 按重复度 + 新鲜度
+      层3 其余 → 按(新鲜度, 关键词权重)
+    返回可比较元组(数值越小越靠前);signal 越大越靠前 → 取负。
+    """
+    layer = cand.get('heat_layer', 3)
+    signal = cand.get('heat_signal') or 0
+    source_count = cand.get('source_count') or 1
+    freshness = cand.get('score') or 0  # 已算:发布距当日 0 点的秒数(越小越新)
+    kw = cand.get('keyword_hits') or 0
+    if layer == 1:
+        return (1, -signal, freshness)
+    if layer == 2:
+        return (2, -source_count, freshness)
+    return (3, freshness, -kw)
+
+
 def selection_reason(cand, cfg_r, has_delta_data=False):
     """可解释上榜理由:基于库中真实字段,不用模型编造的模糊话术(问题1修复3)。
 

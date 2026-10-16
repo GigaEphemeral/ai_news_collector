@@ -21,6 +21,7 @@ cp .env.example .env && chmod 600 .env   # 填入真实值(见"配置")
 ./.venv/bin/python run.py --send                  # 3) 从库中发送当日日报(幂等,不重新采集)
 ./.venv/bin/python run.py --report --send         # 4) 采集 + 生成 + 发送一次
 ./.venv/bin/python run.py --report --no-summarize # 5) 跳过 Ollama,强制规则模式
+./.venv/bin/python run.py --emit-candidates       # 6) 采集 + 产出 candidates.json + draft(默认开)
 ```
 
 - `.env` 读取顺序:`AI_NEWS_ENV_PATH` 环境变量 → 项目根上两级目录的 `.env`(`../../.env`) → 项目根 `.env`。程序自动加载,无需手动 source。
@@ -28,6 +29,24 @@ cp .env.example .env && chmod 600 .env   # 填入真实值(见"配置")
 - `--date YYYY-MM-DD` 指定运行日期(默认今天 UTC;快照/主题统计/趋势/日报都归到该日期)。
 - **生成与发送分离**:`--report` 只生成并写入 `daily_reports`;`--send` 只读库发送。飞书不可用时先 `--report` 生成,恢复后直接 `--send`,不重新抓取。
 - **幂等**:`daily_reports.sent_status='sent'` 的日报不会被重复发送,也不会被重新生成覆盖。
+
+## Agent 模式(阶段07)
+
+`run.py --emit-candidates`(默认开)产出两份文件供 AI 情报编辑 agent 使用:
+
+- `data/ai_news_mvp_candidates_YYYYMMDD.json` — 候选条目(placeholder/url/title/platform/facts/reason/content/content_source/fallback_intro + stats/trends);
+- `data/ai_news_mvp_draft_YYYYMMDD.txt` — 带 `{{INTRO_Hx}}/{{INTRO_Ox}}/{{INTRO_Sx}}/{{MODEL_STATUS}}` 唯一占位符的草稿。
+
+agent 按 **`agent_readme.md`** 的说明分批(≤4 条)调用本机 Ollama(`Qwen3.5:9B`,参数 `temperature=0.1 num_predict=512 think=false format=json num_ctx=4096 repeat_penalty=1.05`)替换占位符;失败兜底:content 空→`fallback_intro`,非 JSON/条数不匹配→重试 1 次仍失败整批 fallback;飞书 `code!=0` 停止、超时不重发。
+
+自检(可选):
+
+```bash
+./.venv/bin/python -m src.tools.check_draft data/ai_news_mvp_draft_YYYYMMDD.txt --report data/ai_news_mvp_candidates_YYYYMMDD.json
+./.venv/bin/python -m src.tools.render_draft data/ai_news_mvp_draft_YYYYMMDD.txt data/ai_news_mvp_candidates_YYYYMMDD.json -o out.txt
+```
+
+`--report --send` 降级路径(脚本规则生成 + 飞书发送)保留可用。
 - 单源失败不影响其他源;全部失败或无条目时退出码 1,否则 0。
 
 ## 目录结构
@@ -101,6 +120,7 @@ ai-news-mvp/
 - **去重**(`src/dedup.py`):① URL 归一化(去跟踪参数/默认端口/www);② 标题 SimHash(汉明距离 ≤ `dedup.simhash_threshold`,默认 4);③ 标题或摘要 token 集合 Jaccard 相似度 ≥ `dedup.similarity_threshold`(默认 0.8)判为重复。
 - **入库归并**(阶段03,`src/storage/db.py`):`items` 唯一键 `UNIQUE(platform, native_id)`(自然键:GitHub `full_name` / HN `hn_id` / RSS `(source_id, guid)` 无 guid 回退归一化 url / HF `arxiv_id` 回退 url);入库先按自然键精确匹配,未命中再按内容指纹 `canonical_key`(标题归一化 SimHash)近 7 天窗口模糊匹配(阈值 4),命中则合并——新来源挂 `item_sources`,标题/摘要择优,`first_seen_at` 保留最早,不拒绝;近似标题(指纹距离 > 4)不误并。
 - **全量入库,消费时选 top-N**(阶段04):去重后条目全部写入库(不再入库前截断);日报消费时 `collect_candidates` 按热度规则取 top-N(`highlights_cap`/`opensource_max`/`solutions_max`),当天选中 item id 记入 `daily_reports.selected_item_ids`;未入选条目保留在库供后续使用。`per_platform_cap` 仅作日报候选统计口径。
+- **RSS/HF 热度分层**(阶段05,消费时规则不落库):层1 有真实热度(HF upvotes+stars / 跨源命中 HN 用 points)→按信号;层2 无信号但 `source_count≥2` →按重复度+新鲜度;层3 其余 →按(新鲜度,关键词权重)。HF 条目 `extra` 补采 `{arxiv_id, upvotes, github_stars, github_repo, is_hf_papers}` 落库;「其他资讯汇总」段聚合未入选 top-N 的 RSS/HF,不丢弃。
 - **每平台上限** `per_platform_cap: 10`:只是上限,允许不足 10 条。
 - **趋势**(`src/trend.py`):对项目(基于快照)与主题(基于日统计)输出五态,见下节。
 - **摘要**(`src/summarization/`):可选,只对入选「今日值得关注」的 Top 8 候选调 Ollama;失败自动降级为规则标签。
@@ -285,6 +305,7 @@ FTS 查询:`MATCH 'llm OR agent'` 语法,按 bm25 排序。
 四、趋势观察       (项目/主题 + 状态 + 7d 证据;证据=事实来自库,
                     "初步判断,历史不足"=观察限制,明确标注)
 五、采集状态       (成功来源数/发现→筛选→去重→入库 分段/模型状态/失败源)
+六、其他资讯汇总   (阶段05:未入选 top-N 的 RSS/HF 条目聚合:标题+来源+一句话分类,不丢弃)
 ```
 
 - **「今日值得关注」排序**(纯规则、不评分):新生代(创建 ≤ `report.new_days` 天)优先;老项目仅当 24h Star 增量 ≥ `report.old_repo_min_delta_24h` 或 24h 增长率 ≥ `report.old_repo_min_growth_pct` 才允许上榜;快照不足 2 天(首日)时仅新生代且近期 push(≤ `report.recent_push_days`)入选并标注「初步判断」;上榜理由基于库中真实字段(「今日新出现」「新生代(创建 N 天)」「24h Star +N(前一日 M)」等),Ollama 摘要路径同样由代码覆盖为库中事实。
