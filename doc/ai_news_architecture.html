@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 情报采集器 · 架构与工程复盘</title>
+<meta name="description" content="ai-news-mvp 系统架构图、数据流光点动效、开发流程时间线与工程经验总结（单文件自包含，无外部依赖）。">
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --panel2:#273549; --ink:#e2e8f0; --muted:#94a3b8;
+    --line:#334155; --accent:#38bdf8; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+    --orch:#64748b; --col:#2dd4bf; --pipe:#fb923c; --store:#a78bfa; --read:#60a5fa;
+    --prod:#fb7185; --sum:#22d3ee; --deliver:#4ade80; --core:#94a3b8;
+    --card:#1e293b; --cardborder:#334155;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;
+  }
+  a{color:var(--accent)}
+  .wrap{max-width:1440px;margin:0 auto;padding:0 20px 80px}
+  header.site{ padding:34px 20px 18px; text-align:center; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#17203a,transparent)}
+  header.site h1{margin:0 0 6px;font-size:30px;letter-spacing:.5px}
+  header.site p.sub{margin:0 auto;max-width:900px;color:var(--muted);font-size:14px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:14px}
+  .chip{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:3px 11px;color:var(--muted);background:var(--panel)}
+  .chip b{color:var(--ink);font-weight:600}
+  /* ---- 左侧悬浮导航（贴正文内容左缘，位置由 JS 计算） ---- */
+  nav.toc{position:fixed;top:50%;transform:translateY(-50%);left:14px;z-index:40;display:flex;flex-direction:column;gap:4px;
+    max-height:78vh;overflow-y:auto;overscroll-behavior:contain;
+    background:rgba(15,23,42,.94);border:1px solid var(--line);border-radius:16px;padding:10px 8px;
+    box-shadow:0 8px 30px rgba(0,0,0,.45);backdrop-filter:blur(6px)}
+  nav.toc::-webkit-scrollbar{width:5px}
+  nav.toc::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  nav.toc::-webkit-scrollbar-track{background:transparent}
+  nav.toc .toc-cap{font-size:10px;letter-spacing:3px;color:var(--muted);text-align:center;padding:2px 0 6px;border-bottom:1px solid var(--line);margin-bottom:6px;position:sticky;top:0;background:rgba(15,23,42,.96)}
+  nav.toc a{color:var(--muted);text-decoration:none;font-size:13px;border:1px solid transparent;padding:6px 14px;border-radius:9px;display:block;white-space:nowrap}
+  nav.toc a:hover{color:var(--accent);border-color:var(--line);background:var(--panel)}
+  nav.toc a.active{color:var(--accent);border-color:var(--line);background:var(--panel);font-weight:600}
+  nav.toc a .no{display:inline-block;min-width:22px;font-weight:700;color:var(--accent)}
+  nav.toc .toc-group{margin-bottom:2px}
+  nav.toc .sub{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px}
+  nav.toc .sub a{font-size:12px;padding:3px 12px 3px 24px;border:none;background:none;border-radius:7px;opacity:.88}
+  nav.toc .sub a::before{content:"·";margin-right:7px;color:var(--line)}
+  nav.toc .sub a:hover{opacity:1;background:var(--panel)}
+  [id]{scroll-margin-top:26px}
+
+  main{display:block}
+  section{scroll-margin-top:16px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin:46px 0 14px}
+  .sec-head .no{font-size:13px;font-weight:700;color:#0f172a;background:var(--accent);border-radius:8px;padding:3px 10px}
+  .sec-head h2{margin:0;font-size:22px}
+  .sec-head .tag{color:var(--muted);font-size:13px}
+
+  /* ---- 图例 + 控制条 ---- */
+  .diagram-bar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:8px 0 10px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 16px}
+  .legend .item{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .legend .sw{width:22px;height:3px;border-radius:2px;display:inline-block}
+  .legend .sw.dash{height:0;border-top:3px dashed}
+  .legend .dot{width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 6px currentColor}
+  .ctrl{display:inline-flex;gap:6px;align-items:center;margin-left:auto}
+  .btn{font:inherit;font-size:13px;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:5px 12px;cursor:pointer}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.active{background:var(--accent);color:#0f172a;border-color:var(--accent);font-weight:600}
+
+  /* ---- SVG 图 ---- */
+  .svg-frame{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:6px}
+  svg.diagram{width:100%;height:auto;display:block}
+  /* 交互：hover 高亮由 JS 加 class */
+  g.node{cursor:pointer;transition:opacity .18s}
+  g.node rect{transition:stroke-width .15s, filter .15s}
+  g.node .nrect{fill-opacity:.96}
+  g.edge path, g.edge line{transition:opacity .18s}
+  g.part{transition:opacity .18s}
+  g.edge.dim, g.part.dim{opacity:.14}
+  g.node.dim{opacity:.32}
+  g.node.hovered rect{stroke-width:3;filter:drop-shadow(0 0 6px rgba(56,189,248,.55))}
+  .node-title{font-size:14.5px;font-weight:700;fill:#0f172a}
+  .node-line{font-size:11px;fill:#334155}
+  .edge-label{font-size:10px;fill:var(--ink);paint-order:stroke;stroke:#0f172a;stroke-width:3px;stroke-linejoin:round}
+  .layer-band text{font-size:11px;fill:var(--muted);letter-spacing:2px;text-transform:uppercase}
+
+  /* ---- 卡片/表格/图 ---- */
+  .grid{display:grid;gap:16px}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  .card{background:var(--card);border:1px solid var(--cardborder);border-radius:14px;padding:18px 20px}
+  .card h4{margin:0 0 10px;font-size:16px}
+  .card p{margin:0;color:var(--muted);font-size:14px;line-height:1.75}
+  .card ol{margin:8px 0 0;padding-left:20px;color:var(--muted);font-size:14px;line-height:1.75}
+  .card ol li{margin:5px 0}
+  .card ul{margin:8px 0 0;padding-left:20px;color:var(--muted);font-size:14px;line-height:1.75}
+  .card li{margin:4px 0}
+  .card .hl{color:var(--ink)}
+  .tagpill{display:inline-block;font-size:11px;border-radius:6px;padding:1px 8px;margin-right:6px;background:var(--panel2);border:1px solid var(--line);color:var(--ink)}
+  .pill-ok{color:#052e16;background:var(--ok);border-color:var(--ok)}
+  .pill-warn{color:#3a2400;background:var(--warn);border-color:var(--warn)}
+  .pill-bad{color:#3f0a0a;background:var(--bad);border-color:var(--bad)}
+
+  table.t{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px;line-height:1.6}
+  table.t th,table.t td{border:1px solid var(--line);padding:8px 12px;text-align:left;vertical-align:top}
+  table.t th{background:var(--panel2);color:var(--ink);font-weight:600}
+  table.t td{color:var(--muted)}
+  table.t tr td:first-child{color:var(--ink);white-space:nowrap}
+
+  /* ---- 多设备环境图 ---- */
+  .env{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:10px}
+  .env-node{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel2)}
+  .env-node .env-title{font-size:14px;font-weight:700;color:var(--ink)}
+  .env-node .env-sub{margin-top:6px;font-size:12.5px;color:var(--muted);line-height:1.7}
+  .env-node.cloud{border-color:var(--orch)}
+  .env-node.dev{border-color:#c05621}
+  .env-node.prod{border-color:#2b6cb0}
+  .env-node.api{border-color:#16a34a}
+
+  /* ---- 图片 ---- */
+  .imgs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px;margin-top:10px}
+  figure{margin:0}
+  figure img{width:100%;height:auto;border:1px solid var(--line);border-radius:12px;display:block;background:#0b1220}
+  figcaption{margin-top:8px;color:var(--muted);font-size:13px;text-align:center}
+
+  /* ---- 时间线 ---- */
+  .timeline{position:relative;margin:10px 0 0;padding-left:26px}
+  .timeline::before{content:"";position:absolute;left:8px;top:6px;bottom:6px;width:2px;background:var(--line)}
+  .tl-item{position:relative;padding:0 0 18px 6px}
+  .tl-item::before{content:"";position:absolute;left:-24px;top:7px;width:12px;height:12px;border-radius:50%;background:var(--accent);border:2px solid #0f172a}
+  .tl-item h4{margin:0;font-size:15px}
+  .tl-item .meta{font-size:12px;color:var(--muted);margin:2px 0 4px}
+  .tl-item .dur{display:inline-block;font-size:11px;font-weight:700;color:#0f172a;background:var(--accent);border-radius:6px;padding:1px 8px}
+  .tl-item p{margin:4px 0 0;color:var(--muted);font-size:13px}
+
+  /* ---- 三层协作 ---- */
+  .layers{display:flex;flex-direction:column;gap:10px;margin-top:8px}
+  .layer{display:flex;gap:14px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;padding:12px 16px;background:var(--card)}
+  .layer .lno{font-size:12px;font-weight:700;color:#0f172a;border-radius:8px;padding:2px 10px;white-space:nowrap;margin-top:2px}
+  .layer .lbody h4{margin:0 0 4px;font-size:15px}
+  .layer .lbody p{margin:0;color:var(--muted);font-size:13px}
+  .l1 .lno{background:var(--orch)}
+  .l2 .lno{background:var(--store)}
+  .l3 .lno{background:var(--sum)}
+
+  code{background:#0b1220;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12px;color:#a5d8ff}
+  pre{background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto;font-size:12.5px;color:#cbd5e1}
+  pre code{background:none;border:none;padding:0}
+
+  footer.site{margin-top:60px;padding:24px 20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;text-align:center}
+
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  .skip{position:absolute;left:-999px;top:0;background:var(--accent);color:#0f172a;padding:8px 14px;border-radius:0 0 8px 0;z-index:50}
+  .skip:focus{left:0}
+
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto}
+    *{animation:none!important;transition:none!important}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主内容</a>
+
+<header class="site">
+  <h1>AI 情报采集器 · 架构与工程复盘</h1>
+  <p class="sub">ai-news-mvp：从 4 类外部数据源（GitHub / Hacker News / 官方博客 RSS / HF Daily Papers）采集 AI 情报，经<strong>规则筛选 → 跨源去重 → 全量入库 → 趋势引擎 → 六栏目日报</strong>，通过飞书机器人每日送达；本机 Ollama 可选摘要、Agent 模式可选渲染。下方主架构图用方块表示模块与数据源（类 UML 风格），连线上的<strong>光点</strong>表示数据/调用在流动。</p>
+  <div class="chips">
+    <span class="chip"><b>Python 3.14</b> · SQLite(FTS5)</span>
+    <span class="chip">单次运行入口 <code>run.py</code></span>
+    <span class="chip">无自建调度 · autopilot/cron 每日触发</span>
+    <span class="chip">146 个 pytest</span>
+    <span class="chip">纯规则优先 · 模型按需可选</span>
+  </div>
+  <nav class="toc" aria-label="页内导航">
+    <div class="toc-cap">目录</div>
+    <div class="toc-group">
+      <a href="#arch"><span class="no">01</span>主架构图</a>
+    </div>
+    <div class="toc-group">
+      <a href="#flow"><span class="no">02</span>处理链路</a>
+    </div>
+    <div class="toc-group">
+      <a href="#timeline"><span class="no">03</span>开发流程</a>
+      <div class="sub">
+        <a href="#tl-way">推进方式</a>
+        <a href="#tl-agent">Multica 多 Agent 探索</a>
+        <a href="#tl-data">关键数据</a>
+        <a href="#tl-phases">阶段时间线</a>
+      </div>
+    </div>
+    <div class="toc-group">
+      <a href="#ops"><span class="no">04</span>工程经验</a>
+      <div class="sub">
+        <a href="#ops-env">多设备 · 多 Agent 配置</a>
+        <a href="#ops-layers">三层协作架构</a>
+        <a href="#ops-roles">五个智能体角色</a>
+        <a href="#ops-good">做对了什么</a>
+        <a href="#ops-cost">代价与处理方式探索</a>
+        <a href="#ops-time">成本与时间</a>
+        <a href="#ops-roadmap">优化路线</a>
+        <a href="#ops-sec">四道安全边界</a>
+        <a href="#ops-concl">最终结论</a>
+      </div>
+    </div>
+    <div class="toc-group">
+      <a href="#results"><span class="no">05</span>实现效果</a>
+      <div class="sub">
+        <a href="#res-funnel">采集漏斗</a>
+        <a href="#res-artifacts">运行产物</a>
+        <a href="#res-tests">测试与可恢复性</a>
+        <a href="#res-shots">飞书送达效果</a>
+      </div>
+    </div>
+  </nav>
+</header>
+
+<main id="main" class="wrap">
+
+  <!-- ================= 主架构图 ================= -->
+  <section id="arch" aria-labelledby="arch-h">
+    <div class="sec-head"><span class="no">01</span><h2 id="arch-h">主架构图</h2><span class="tag">分层 · 类 UML 方块 · 连线光点动效 · 悬停高亮</span></div>
+    <div class="diagram-bar">
+      <div class="legend" role="group" aria-label="图例">
+        <span class="item"><span class="sw" style="background:var(--col)"></span>采集（外→内）</span>
+        <span class="item"><span class="sw" style="background:var(--pipe)"></span>规则管线</span>
+        <span class="item"><span class="sw" style="background:var(--store)"></span>落库</span>
+        <span class="item"><span class="sw" style="background:var(--read)"></span>读库/消费</span>
+        <span class="item"><span class="sw" style="background:var(--prod)"></span>日报产出</span>
+        <span class="item"><span class="sw" style="background:var(--deliver)"></span>发送/交付</span>
+        <span class="item"><span class="sw" style="background:var(--orch)"></span>编排/调度</span>
+        <span class="item"><span class="sw dash" style="border-color:var(--sum);color:var(--sum)"></span>虚线 = 读取/回写/可选/依赖</span>
+      </div>
+      <span style="color:var(--muted);font-size:12px;margin-left:auto">动效：单个光点自上而下沿流程流动，遇分支方块分裂为多点、汇合后合并，叶节点结束；悬停聚焦点亮区域，其余区域暂停</span>
+    </div>
+    <div class="svg-frame">
+      <svg id="diagram" class="diagram" viewBox="0 0 1320 1090" role="img"
+           aria-label="AI 情报采集器分层架构图：定时调度触发 run.py，采集四类数据源，经规则筛选与跨源去重后全量入库 SQLite，趋势引擎与日报生成读取数据库，最终经飞书发送；Ollama 摘要与 Agent 模式为可选项；src/core 为横切基础设施。">
+        <defs id="defs"></defs>
+      </svg>
+    </div>
+    <p style="color:var(--muted);font-size:12px;margin-top:6px">
+      <b style="color:var(--ink)">说明：</b>实线 = 数据流/调用（光点沿实线流动表示数据在流动）；虚线 = 读取/回写/可选调用。
+      依赖方向从底向上：<code>src/core</code>（config/log/vendored 复用）作为横切基座被所有模块使用，图中未逐一画线。
+      采集层每源独立 try/except + 超时退避，单源失败不影响其他源；去重后<strong>全量入库</strong>，日报在消费时按热度取 top-N。
+    </p>
+  </section>
+
+  <!-- ================= 处理链路 ================= -->
+  <section id="flow" aria-labelledby="flow-h">
+    <div class="sec-head"><span class="no">02</span><h2 id="flow-h">处理链路与关键设计</h2><span class="tag">从采集到交付的七个环节</span></div>
+    <div class="grid g4">
+      <div class="card"><h4>① 采集</h4><ul>
+        <li>4 类来源，各源独立容错</li>
+        <li>GitHub 3 组查询 / HN topstories / RSS×4 + HF 论文</li>
+        <li>超时 + 指数退避重试，403/429 不硬闯</li>
+      </ul></div>
+      <div class="card"><h4>② 规则筛选</h4><ul>
+        <li>字段完整（url+title）→ 时间窗口 → AI 关键词</li>
+        <li>仅 HN/RSS/HF 判断关键词；GitHub 由查询模板保证相关性</li>
+      </ul></div>
+      <div class="card"><h4>③ 跨源去重</h4><ul>
+        <li>URL 归一化 → 标题 SimHash（汉明 ≤4）→ Jaccard ≥0.8</li>
+        <li>指纹 <code>canonical_key</code> 供跨源归并</li>
+      </ul></div>
+      <div class="card"><h4>④ 全量入库</h4><ul>
+        <li>自然键 <code>UNIQUE(platform,native_id)</code> 精确匹配</li>
+        <li>未命中→指纹近 7 天窗口模糊匹配→合并/插入</li>
+        <li>快照 + 主题日统计写回</li>
+      </ul></div>
+      <div class="card"><h4>⑤ 趋势引擎</h4><ul>
+        <li>纯规则五态 × 3 窗（24h/7d/30d）</li>
+        <li>每结论带证据（表名+数字+时间窗）</li>
+        <li>窗口不足明确标注；首日只建基线</li>
+      </ul></div>
+      <div class="card"><h4>⑥ 日报生成</h4><ul>
+        <li>当日活跃条目 → 候选排序/资格（消费时 top-N）</li>
+        <li>六栏目 + 长度/关键词校验</li>
+        <li>可选 Ollama 摘要，失败自动降级规则标签</li>
+      </ul></div>
+      <div class="card"><h4>⑦ 发送 / Agent</h4><ul>
+        <li>飞书幂等发送（webhook 脱敏、退避重试、uncertain 停发）</li>
+        <li>可选 Agent 模式：draft 占位符 → 本地 Ollama 分批渲染</li>
+      </ul></div>
+      <div class="card"><h4>横切 src/core</h4><ul>
+        <li>config.py（yaml+env）/ log.py（按日滚动 90 天）</li>
+        <li>vendored 复用（rss_fetcher/lsh_dedup/log_config/content_processor/config_loader）</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <!-- ================= 开发流程 ================= -->
+  <section id="timeline" aria-labelledby="tl-h">
+    <div class="sec-head"><span class="no">03</span><h2 id="tl-h">开发流程</h2><span class="tag">重点：推进方式 · 对 Multica 多 Agent 的探索</span></div>
+
+    <div class="card" style="margin-bottom:16px;border-left:3px solid var(--accent)">
+      <h4 id="tl-way">推进方式（本次实践的核心）</h4>
+      <p style="color:var(--ink)">不是「先把架构设计得很复杂再编码」，而是<strong>先打通端到端链路、再逐步增强质量</strong>；由人做方向与验收，AI 负责拆解与执行。</p>
+      <ol>
+        <li><b style="color:var(--ink)">PRD 先行</b>：先与 GPT 网页端发散需求、确认技术方案 → 形成完整 PRD → 交给 Mika 分析并准备开发</li>
+        <li><b style="color:var(--ink)">Mika 拆解为 Issue</b>：逐阶段创建 AIQI-1~8，分配开发/采集/发送角色；<b style="color:var(--ink)">人在卡点确认、任务结束审核</b>，其余交给智能体执行</li>
+        <li><b style="color:var(--ink)">先闭环、后增强</b>：先打通 采集→日报→飞书 端到端（首条真实日报当晚 20:48 送达，核心链路早验证），再补历史库、趋势、反馈修复、自动化</li>
+        <li><b style="color:var(--ink)">反馈打包</b>：成员反馈一次性合并进 AIQI-7（排序/上榜理由/摘要/处理顺序/相似度去重/分段统计），避免每一条反馈都触发一次完整开发回合</li>
+        <li><b style="color:var(--ink)">文档即资产</b>：README 路径相对化、配置说明清晰化，项目更易迁移，减少智能体每次启动时的无效探索</li>
+      </ol>
+    </div>
+
+    <div class="grid" style="grid-template-columns:1.15fr 1fr;gap:18px;margin-bottom:16px">
+      <div class="card">
+        <h4 id="tl-agent">对 Multica 多 Agent 的探索（验证了什么）</h4>
+        <ul>
+          <li><b style="color:var(--ink)">跨设备协作</b>：Windows（本地模型）+ Linux（生产运行）双机分工，经 Multica Cloud 中转协作</li>
+          <li><b style="color:var(--ink)">多角色分工</b>：Mika 协调 / 纯开发 / 军情三处(联网搜索) / 信使(本地整理+飞书) / 本地数据分析</li>
+          <li><b style="color:var(--ink)">云端 + 本地混合</b>：DeepSeek API 承担高强度开发与联网，本地 Qwen3.5:9B 承担摘要与规整，平衡质量/费用/硬件</li>
+          <li><b style="color:var(--ink)">定时触发</b>：Multica Autopilot 每日调度采集/发送；Python 只跑验收过的固定命令，智能体不参与每日业务思考</li>
+          <li><b style="color:var(--ink)">探索结论</b>：一套有效的个人 AI 开发工作流<strong>原型</strong>（核心开发 4.2h、次日首个自动周期）；同时暴露 <strong>上下文重读 / 任务锁竞争 / 职责重叠 / 可观测性</strong> 四个短板 → 详见「工程经验」</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4 id="tl-data">关键数据</h4>
+        <table class="t">
+          <tbody>
+            <tr><td>核心开发时长</td><td>当晚约 <b>4.2 小时</b>（10-14 18:48 开工 → 22:40 完成）</td></tr>
+            <tr><td>首个自动日报周期</td><td>10-15 08:53 完成</td></tr>
+            <tr><td>首条真实日报</td><td>10-14 20:48 送达飞书</td></tr>
+            <tr><td>单次采集耗时</td><td>约 68 秒（10-14 实测）</td></tr>
+            <tr><td>发送环节耗时</td><td>不足 5 秒</td></tr>
+            <tr><td>测试规模</td><td>146 个 pytest</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:8px;font-size:12.5px">注：各 Issue 耗时存在重叠（AIQI-3~6 创建与执行区间交叉），不应简单相加作为项目总工时。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h4 id="tl-phases">阶段时间线（补充材料）</h4>
+      <div class="timeline">
+        <div class="tl-item">
+          <h4>阶段 1 · 审计与最小可行版 <span class="dur">23 分钟</span></h4>
+          <div class="meta">AIQI-1</div>
+          <p>审计已有 <code>ai-news-brief</code>，确认可复用模块与运行限制，而不是整体照搬。</p>
+        </div>
+        <div class="tl-item">
+          <h4>阶段 2 · 接入情报源 <span class="dur">57 分钟</span></h4>
+          <div class="meta">AIQI-3</div>
+          <p>接入 GitHub Search API / HN 官方 API / RSS / Hugging Face，建立单次运行入口 <code>run.py</code>。</p>
+        </div>
+        <div class="tl-item">
+          <h4>阶段 3 · 历史库与趋势引擎 <span class="dur">73 分钟</span></h4>
+          <div class="meta">AIQI-4</div>
+          <p>SQLite + FTS5 保存历史情报，项目快照与五态趋势规则，补充测试。</p>
+        </div>
+        <div class="tl-item">
+          <h4>阶段 4 · 日报与飞书 <span class="dur">93 分钟</span></h4>
+          <div class="meta">AIQI-5</div>
+          <p>日报模板 + 可选 Ollama 摘要 + 飞书幂等发送。<strong>20:48 首条真实日报送达</strong>。</p>
+        </div>
+        <div class="tl-item">
+          <h4>阶段 5 · 定时与稳定性 <span class="dur">171 分钟</span></h4>
+          <div class="meta">AIQI-6</div>
+          <p>收尾稳定性问题，接入 Multica Autopilot 定时触发机制。</p>
+        </div>
+        <div class="tl-item">
+          <h4>阶段 6 · 反馈修复 <span class="dur">67 分钟</span></h4>
+          <div class="meta">AIQI-7</div>
+          <p>一次合并处理：新生代排序、上榜理由、摘要、处理顺序、相似度去重、分段统计。</p>
+        </div>
+        <div class="tl-item">
+          <h4>阶段 7 · 文档收尾 <span class="dur">21 分钟</span></h4>
+          <div class="meta">AIQI-8</div>
+          <p>相对化路径、重构 README、补充开发统计信息。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 工程经验 ================= -->
+  <section id="ops" aria-labelledby="ops-h">
+    <div class="sec-head"><span class="no">04</span><h2 id="ops-h">工程经验</h2><span class="tag">依据 doc/工程总结文档.md · 跨设备多智能体协作复盘</span></div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h4 id="ops-env">多设备 · 多 Agent 运行环境</h4>
+      <div class="env">
+        <div class="env-node cloud">
+          <div class="env-title">☁️ Multica Cloud · 云端中转</div>
+          <div class="env-sub">任务分发 · 评论 · 状态推进（非本地部署）</div>
+        </div>
+        <div class="env-node dev">
+          <div class="env-title">💻 Windows · 192.168.0.103</div>
+          <div class="env-sub">32G 内存 · RTX 4060 8G<br>multica(Hermes)：Mika 项目组长<br>Ollama：qwen3.5:9B · bge-m3</div>
+        </div>
+        <div class="env-node prod">
+          <div class="env-title">🖥 Linux · 192.168.0.101</div>
+          <div class="env-sub">16G 内存 · 1050Ti<br>multica(Hermes)：军情三处(联网采集) · 信使(规整→飞书)<br>multica(Pi)：纯开发(编码测试)<br>运行 ai-news-mvp：Python 3.14 · SQLite/FTS5</div>
+        </div>
+        <div class="env-node api">
+          <div class="env-title">🌐 DeepSeek API · deepseek-v4-flash</div>
+          <div class="env-sub">云端模型：开发 / 联网搜索 / 任务协调</div>
+        </div>
+      </div>
+      <p style="margin-top:12px">协作链路：Mika / 军情三处 / 纯开发 → DeepSeek API；信使 → <b>LAN HTTP</b> → Windows Ollama；纯开发 → ai-news-mvp。核心原则：<b>代码和数据归 Linux 管，模型推理由云端或本地承担，Multica 管理任务与流程</b>；正式代码经 Git 同步，数据库/凭证/运行状态单独定规则，不靠仓库同步。</p>
+      <table class="t" style="margin-top:10px">
+        <tbody>
+          <tr><td>Linux 笔记本</td><td>主开发机 + 生产运行环境：正式代码 / 虚拟环境 / .env / 数据库 / 日报 / 日志，唯一权威运行环境（Ubuntu · Python 3.14 · Git · SQLite）</td></tr>
+          <tr><td>Windows 笔记本</td><td>开发辅助台 + 本地模型宿主：Qwen3.5:9B / bge-m3，Linux 经局域网调用以降低云端推理成本（Win10 · 32G · RTX 4060 · Ollama）</td></tr>
+          <tr><td>Multica</td><td>任务组织与协作入口：拆 Issue、分配、定时触发、验收；它是编排层，不应该成为每天必须参与思考的「超级主程序」</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h4 id="ops-layers">协作架构：三层而非五个智能体自由协商</h4>
+      <div class="layers">
+        <div class="layer l1">
+          <span class="lno">第一层</span>
+          <div class="lbody"><h4>任务与编排 · Multica / Mika</h4><p>Issue、任务分配、定时触发、验收与异常协调。它是协作与编排层，不是每天必须思考的「超级主程序」。</p></div>
+        </div>
+        <div class="layer l2">
+          <span class="lno">第二层</span>
+          <div class="lbody"><h4>确定性业务程序 · Linux · Python · SQLite/FTS5</h4><p>采集 → 规则筛选 → 去重 → 历史记录 → 趋势 → 日报 → 飞书。能用一个 Python 函数可靠完成的，就不必启动一个消耗上下文的智能体。</p></div>
+        </div>
+        <div class="layer l3">
+          <span class="lno">第三层</span>
+          <div class="lbody"><h4>云端智能体 + 本地模型（按需）</h4><p>云端：开发、联网搜索、复杂问题处理；本地 Qwen3.5:9B：摘要、数据规整、按需分析。模型是按需调用的能力，不应成为每个环节的必经步骤。</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid g3" style="margin-bottom:16px">
+      <div class="card">
+        <h4 id="ops-roles">五个智能体角色</h4>
+        <table class="t">
+          <tbody>
+            <tr><td>Mika</td><td>Chief of Staff · 任务拆分/验收（云端）</td></tr>
+            <tr><td>纯开发</td><td>编码/测试/修复（云端，主要 token 消耗者）</td></tr>
+            <tr><td>军情三处</td><td>联网检索 AI 热点（云端，需约束范围与输出）</td></tr>
+            <tr><td>信使</td><td>数据规整/日报/发送（本地 Qwen）</td></tr>
+            <tr><td>本地数据分析</td><td>按需分析（本地，不进每日关键链路）</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:6px">判断：智能体数量 ≠ 系统能力。每个智能体应有清晰的输入、输出和权限。</p>
+      </div>
+      <div class="card">
+        <h4 id="ops-good">做对了什么</h4>
+        <ul>
+          <li>先实现<strong>完整闭环</strong>，而不是先堆智能体</li>
+          <li>筛选/去重/统计/发送等<strong>确定性工作交给 Python</strong>，降低随机性</li>
+          <li>云端开发与本地执行分工，平衡质量/费用/硬件利用</li>
+          <li>把成员反馈<strong>一次性打包</strong>处理（AIQI-7），避免零散回合</li>
+          <li>把 README/文档当作工程资产，减少智能体无效探索</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h4 id="ops-cost">代价与处理方式探索</h4>
+      <p style="margin-bottom:6px">本次实践的主要效率损耗，以及可尝试的处理方式（探索方向，非最终结论）：</p>
+      <table class="t">
+        <thead><tr><th style="width:20%">代价</th><th style="width:32%">影响</th><th>可能的处理方式探索</th></tr></thead>
+        <tbody>
+          <tr><td>跨任务重读上下文</td><td>每个开发回合重新读取 Issue/文档/配置/源码/测试；复盘估计 AIQI-7 约 20–30 分钟花在重读；云端 token 损耗最大头</td><td>建立精简项目上下文入口（AGENTS.md / current-status.md）；固定 Issue 模板（目标 / 允许修改 / 必须读取 / 验收条件 / 交付报告）；阶段交接模板；测试分层，除非发现明确依赖否则不全仓扫描</td></tr>
+          <tr><td>智能体在日常任务中自由发挥</td><td>搜索智能体自行扩展范围、另一智能体自由组织日报 → 重复搜索/重复读取/重复写文件/token 浪费</td><td>日常执行固定命令 + 固定输入输出；Python 先完成确定性步骤；智能体只在数据不足、执行失败或需人工判断时介入</td></tr>
+          <tr><td>真实网络 / Ollama 测试混入日常</td><td>超时与阻塞反复拖慢测试回合，真实模型输出不稳定</td><td>普通测试用 mock；联网与真实模型测试单独标记（如 pytest mark），在验收或定期检查时执行</td></tr>
+          <tr><td>统计口径易误读</td><td>「发现很多、留下很少」被误读为「大部分被去重」</td><td>采集/筛选/去重/限量分阶段统计（项目已实现分段口径：发现→筛选→去重→入库，日报候选单独标注）</td></tr>
+          <tr><td>调度与职责交叉</td><td>Autopilot 触发智能体与 Python 自行发送并存 → 重复工作/双重发送/失败状态不一致</td><td>明确唯一每日执行入口；先确认采集与发送的依赖及失败处理；迁移 systemd timer 前先停旧 Autopilot 任务防双重调度；发送幂等 + 唯一标识，重试前查是否已发送</td></tr>
+          <tr><td>本地模型依赖</td><td>摘要依赖 Windows 宿主机与局域网可用性（睡眠/服务异常即影响）</td><td>摘要失败自动降级规则标签（已实现）；可测 <code>--no-summarize</code> 纯规则链路；统一状态检查脚本，分阶段记录成败</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid g3" style="margin-bottom:16px">
+      <div class="card">
+        <h4 id="ops-time">成本与时间：三种耗时要分开看</h4>
+        <ul>
+          <li><b>程序执行时间</b>：采集 68s / 发送 &lt;5s —— 很短</li>
+          <li><b>智能体工作时间</b>：读上下文/思考/改码/跑测试 —— 最大头</li>
+          <li><b>排队时间</b>：同目录任务串行锁等待</li>
+        </ul>
+        <p style="margin-top:6px">token 优化重点是<strong>减少无效输入</strong>：精简上下文、合并开发回合、约束搜索、只对 Top-N 调模型、分层运行测试。原则：<em>token 消耗由业务需要决定，不由智能体是否有空决定</em>。</p>
+      </div>
+      <div class="card">
+        <h4 id="ops-roadmap">优化路线</h4>
+        <ul>
+          <li><b>阶段 A</b>：稳定运行——唯一每日执行入口、systemd 迁移、纯程序路径、明确成功判据、限制自动重试</li>
+          <li><b>阶段 B</b>：降本——AGENTS.md / architecture.md / decisions.md / operations.md / current-status.md + 固定 Issue 模板（目标/允许修改/必须读取/验收条件/交付报告）</li>
+          <li><b>阶段 C</b>：更完善的多智能体协作——明确交接协议，Python 能直接做的就直接做</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4 id="ops-sec">四道安全边界</h4>
+        <table class="t">
+          <tbody>
+            <tr><td>文件边界</td><td>仅限指定工作目录，删除/覆盖需额外确认</td></tr>
+            <tr><td>凭证边界</td><td>.env 不进 Git；webhook/PAT 全程脱敏不落日志</td></tr>
+            <tr><td>执行边界</td><td>定时任务只跑验收过的固定命令，不自行改配置</td></tr>
+            <tr><td>发送边界</td><td>唯一标识防重复发送；失败与生成分别记录；重试前查是否已发送</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:3px solid var(--accent)">
+      <h4 id="ops-concl">最终结论</h4>
+      <p style="color:var(--ink)">多智能体架构的效率上限，不取决于智能体数量，而取决于<strong>任务边界是否清楚、上下文是否可复用、程序是否确定、失败是否可诊断</strong>。最值得投入的不是继续增加角色，而是把现有程序变成一个运行成本低、状态清楚、可以恢复、跨设备稳定工作的自动化服务。</p>
+    </div>
+  </section>
+
+  <!-- ================= 实现效果 ================= -->
+  <section id="results" aria-labelledby="res-h">
+    <div class="sec-head"><span class="no">05</span><h2 id="res-h">实现效果</h2><span class="tag">真实运行数据与产物（2026-10-17 实测）</span></div>
+
+    <div class="grid g3" style="margin-bottom:16px">
+      <div class="card">
+        <h4 id="res-funnel">采集漏斗（真实口径）</h4>
+        <p>成功来源 <span class="tagpill pill-ok">4 / 4</span> 失败来源：无</p>
+        <p style="margin-top:6px">
+          <code>发现 1226</code> → <code>筛选 103</code> → <code>去重 103</code> → <code>入库 103</code>
+        </p>
+        <p style="color:var(--muted);font-size:12px">日报候选（消费 top-N）：29 条。各阶段是不同口径：采集量大 ≠ 大部分被去重。</p>
+      </div>
+      <div class="card">
+        <h4 id="res-artifacts">运行产物（data/ 目录）</h4>
+        <ul>
+          <li><code>ai_news_mvp.sqlite3</code> — 全量历史库 + FTS5</li>
+          <li><code>ai_news_mvp_run_YYYYMMDD.json</code> — 运行统计/趋势/日报结果</li>
+          <li><code>ai_news_mvp_candidates_*.json</code> + <code>draft_*.txt</code> — Agent 模式产物</li>
+          <li><code>content_cache.json</code> — GitHub README 7 天缓存</li>
+          <li><code>logs/</code> — 按日滚动日志，保留 90 天</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4 id="res-tests">测试与可恢复性</h4>
+        <ul>
+          <li>146 个 pytest：趋势五态 / 快照幂等 / FTS5 同步 / 旧库迁移 / 跨源归并 / 主题统计 / 日报校验 / Ollama 降级 / 飞书幂等退避 / 断网单源失败 / 日志滚动 / 热度分层 / candidates-draft / agent 工具</li>
+        </ul>
+        <table class="t">
+          <tbody>
+            <tr><td>断网/全源失败</td><td>退出 1 · runs=failed · 恢复重跑幂等</td></tr>
+            <tr><td>单源失败</td><td>其余照常 · partial · 退出 0</td></tr>
+            <tr><td>Ollama 不可达</td><td>自动降级规则标签 · 不阻塞不重试</td></tr>
+            <tr><td>飞书不可达</td><td>日报已存库 · <code>--send --date</code> 从库重发</td></tr>
+            <tr><td>发送结果不确定</td><td>置 uncertain 停止重发，避免重复推送</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h4 id="res-shots">飞书送达效果（实际运行截图）</h4>
+      <div class="imgs">
+        <figure>
+          <img src="飞书app效果图.jpg" alt="飞书 App 内 AI 情报日报送达效果截图，展示群内收到的日报消息">
+          <figcaption>飞书 App 效果图（群内日报展示）</figcaption>
+        </figure>
+        <figure>
+          <img src="飞书效果图2.png" alt="飞书日报效果图 2，展示日报正文内容">
+          <figcaption>飞书效果图 2（日报正文）</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site">
+  <p>AI 情报采集器 · 架构与工程复盘 —— 内容依据 <code>README.md</code> / <code>src/</code> 源码 / <code>doc/工程总结文档.md</code> 整理。</p>
+  <p style="margin-top:6px">技术栈：Python 3.14 · SQLite(FTS5) · requests/httpx/feedparser/curl_cffi/simhash/trafilatura；复用 <a href="https://github.com/frankzch/ai-news-brief">frankzch/ai-news-brief</a>(MIT) 已 vendored。单文件自包含，无外部依赖。</p>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  /* =========================================================
+   * 1) 数据模型：节点（UML 风格方块）+ 边（光点连线）
+   * ========================================================= */
+  var NODES = [
+    // 编排与入口
+    {id:'T1', x:40,  y:16,  w:270, h:84,  layer:'orch', title:'定时调度',
+     lines:['multica autopilot / cron','每日触发 · 无自建调度']},
+    {id:'T2', x:350, y:16,  w:620, h:84,  layer:'orch', title:'run.py · 单次运行入口',
+     lines:['编排：采集 → 管线 → 入库 → 日报 → 发送','CLI：--report / --send / --since-days / --emit-candidates']},
+    {id:'T3', x:970, y:16,  w:270, h:84,  layer:'cfg', title:'config.yaml + .env',
+     lines:['非秘密配置 / 秘密(env)','GITHUB_PAT · FEISHU_WEBHOOK_*']},
+    // 外部数据源
+    {id:'S1', x:40,  y:140, w:270, h:100, layer:'src', title:'GitHub Search API',
+     lines:['3 组查询模板({d})','新项目/新兴Agent/活跃LLM','PAT · search 30/min']},
+    {id:'S2', x:350, y:140, w:270, h:100, layer:'src', title:'Hacker News API',
+     lines:['官方 Firebase API','topstories 前 50 · 热度≥100','年龄窗口 2h–3d']},
+    {id:'S3', x:660, y:140, w:270, h:100, layer:'src', title:'官方博客 RSS ×4',
+     lines:['OpenAI / HF / DeepMind / NVIDIA','超大 feed 早期截断','curl_cffi → httpx 回退']},
+    {id:'S4', x:970, y:140, w:270, h:100, layer:'src', title:'HF Daily Papers',
+     lines:['JSON API · upvotes+stars 双排名','保留前 N 篇','只留带 GitHub 仓库的论文']},
+    // 采集层
+    {id:'C1', x:40,  y:280, w:270, h:100, layer:'col', title:'collectors/github.py',
+     lines:['GitHubCollector','逐查询退避重试','403/429 限流不硬闯','轻量字段(不抓 README)']},
+    {id:'C2', x:350, y:280, w:270, h:100, layer:'col', title:'collectors/hackernews.py',
+     lines:['HackerNewsCollector','逐条抓取 · 失败容错','热度 + 关键词过滤']},
+    {id:'C3', x:660, y:280, w:580, h:100, layer:'col', title:'collectors/rss.py · MVPFeedFetcher',
+     lines:['复用 vendored rss_fetcher · RSS 博客 + HF 论文路由','单 feed 独立 try/except · 并发 4 抓取']},
+    // 规则管线（采集时）
+    {id:'D1', x:40,  y:430, w:270, h:110, layer:'pipe', title:'pipeline/filters.py · 规则筛选',
+     lines:['字段完整 (url+title)','时间窗口 (max/min age)','AI 关键词初筛','仅 HN/RSS/HF 判断']},
+    {id:'D2', x:350, y:430, w:270, h:110, layer:'pipe', title:'pipeline/dedup.py · 跨源去重',
+     lines:['URL 归一化','标题 SimHash ≤ 4','Jaccard 相似度 ≥ 0.8','canonical_key 内容指纹']},
+    // 存储层
+    {id:'E1', x:40,  y:580, w:880, h:120, layer:'store', title:'SQLite 历史库 · storage/schema.py + db.py',
+     lines:['items UNIQUE(platform,native_id) · item_sources 跨源映射 · project_snapshots(repo+date)',
+            'topic_daily_stats · runs · daily_reports · sources · items_fts(FTS5 全文检索)',
+            '自然键精确 → 指纹近 7 天窗口 → 合并/插入 · WAL · 旧库自动迁移']},
+    {id:'E2', x:950, y:580, w:290, h:120, layer:'store', title:'pipeline/topic_stats.py · 主题日统计',
+     lines:['当日 first_seen 条目','按主题聚合 条数/来源数','代表情报 = 互动最高']},
+    // 产出层
+    {id:'F1', x:40,  y:750, w:270, h:120, layer:'prod', title:'reporting/trend.py · 趋势引擎',
+     lines:['纯规则五态 × 3 窗 (24h/7d/30d)','新出现/升温/突增/成熟/回落','每结论带证据 · 窗口不足标注','首日只建基线 · 停滞降权']},
+    {id:'F2', x:350, y:750, w:270, h:120, layer:'prod', title:'ranking.py + tagging.py',
+     lines:['候选排序/资格（消费时）','freshness 新生代优先','RSS/HF 热度三层','可解释上榜理由 · 规则标签']},
+    {id:'F3', x:660, y:750, w:270, h:120, layer:'prod', title:'reporting/report.py · 日报六栏目',
+     lines:['collect_candidates 当日活跃','一~六栏目 + 长度/关键词校验','candidates.json + draft.txt','daily_reports 入库']},
+    {id:'F4', x:970, y:750, w:270, h:120, layer:'sum', title:'summarization · 摘要（可选）',
+     lines:['ollama_client (think=false/json)','news_summarizer Top-N','solution_summarizer 一行摘要','content_fetcher 详情(7天缓存)']},
+    // 交付层
+    {id:'G1', x:350, y:920, w:270, h:90, layer:'deliver', title:'reporting/feishu.py · 飞书发送',
+     lines:['webhook 脱敏 · 安全关键词','明确失败退避重试','不确定 → uncertain 停发']},
+    {id:'G2', x:660, y:920, w:270, h:90, layer:'deliver', title:'Agent 模式（可选）',
+     lines:['draft 占位符 {{INTRO_*}} / {{MODEL_STATUS}}','本地 Ollama 分批渲染 (≤4)','render_draft / check_draft']},
+    // 基础设施（横切，底带，不画边）
+    {id:'CORE', x:40, y:1020, w:1220, h:56, layer:'core', title:'src/core · 基础设施（横切基座）',
+     lines:['config.py（yaml+env）· log.py（按日滚动 90 天）· vendored 复用：rss_fetcher / lsh_dedup / log_config / content_processor / config_loader（MIT）']},
+  ];
+
+  var EDGES = [
+    {id:'E1',  from:'T1', to:'T2', kind:'orch',   label:'每日触发'},
+    {id:'E2',  from:'T2', to:'S1', kind:'col'},
+    {id:'E3',  from:'T2', to:'S2', kind:'col'},
+    {id:'E4',  from:'T2', to:'S3', kind:'col'},
+    {id:'E5',  from:'T2', to:'S4', kind:'col'},
+    {id:'E6',  from:'S1', to:'C1', kind:'col',   label:'3 组查询'},
+    {id:'E7',  from:'S2', to:'C2', kind:'col',   label:'topstories'},
+    {id:'E8',  from:'S3', to:'C3', kind:'col',   label:'RSS ×4'},
+    {id:'E9',  from:'S4', to:'C3', kind:'col',   label:'HF 论文'},
+    {id:'E10', from:'C1', to:'D1', kind:'pipe'},
+    {id:'E11', from:'C2', to:'D1', kind:'pipe'},
+    {id:'E12', from:'C3', to:'D1', kind:'pipe'},
+    {id:'E13', from:'D1', to:'D2', kind:'pipe',  label:'规则筛选'},
+    {id:'E14', from:'D2', to:'E1', kind:'store', label:'全量入库'},
+    {id:'E15', from:'E1', to:'E2', kind:'store', dashed:true, both:true, label:'读 / 写统计'},
+    {id:'E16', from:'E1', to:'F1', kind:'read',  ao:[-160,0], label:'快照 / 统计'},
+    {id:'E17', from:'E1', to:'F2', kind:'read',  label:'当日活跃'},
+    {id:'E18', from:'E1', to:'F4', kind:'read',  dashed:true, ao:[345,0], label:'候选内容'},
+    {id:'E19', from:'F1', to:'F3', kind:'prod',  arc:'up', ao:[-70,0], bo:[70,0], label:'趋势结论'},
+    {id:'E20', from:'F2', to:'F3', kind:'prod',  label:'top-N 候选'},
+    {id:'E21', from:'F4', to:'F3', kind:'sum',   dashed:true, label:'可选摘要'},
+    {id:'E22', from:'F3', to:'G1', kind:'deliver', label:'日报正文'},
+    {id:'E23', from:'F3', to:'G2', kind:'deliver', label:'candidates + draft'},
+    {id:'E24', from:'F4', to:'G2', kind:'sum',   dashed:true, label:'Ollama 渲染'},
+  ];
+
+  var COLOR = {
+    orch:'#64748b', col:'#2dd4bf', pipe:'#fb923c', store:'#a78bfa',
+    read:'#60a5fa', prod:'#fb7185', sum:'#22d3ee', deliver:'#4ade80', core:'#94a3b8'
+  };
+  var FILL = {
+    orch:'#f1f5f9', col:'#eff6ff', pipe:'#fff7ed', store:'#f5f3ff',
+    read:'#eff6ff', prod:'#fff1f2', sum:'#ecfeff', deliver:'#f0fdf4', cfg:'#fefce8', core:'#f8fafc'
+  };
+  var STROKE = {
+    orch:'#64748b', col:'#2563eb', pipe:'#ea580c', store:'#7c3aed',
+    read:'#2563eb', prod:'#e11d48', sum:'#0891b2', deliver:'#16a34a', cfg:'#a16207', core:'#94a3b8'
+  };
+
+  var svg = document.getElementById('diagram');
+  var NS = 'http://www.w3.org/2000/svg';
+  var nodeMap = {}, edgeMap = {};
+
+  /* =========================================================
+   * 2) 渲染节点
+   * ========================================================= */
+  NODES.forEach(function(n){
+    nodeMap[n.id] = n;
+    var g = document.createElementNS(NS,'g');
+    g.setAttribute('class','node');
+    g.setAttribute('tabindex','0');
+    g.setAttribute('role','group');
+    g.setAttribute('aria-label', n.title + '：' + (n.lines||[]).join('，'));
+
+    var rect = document.createElementNS(NS,'rect');
+    rect.setAttribute('class','nrect');
+    rect.setAttribute('x',n.x); rect.setAttribute('y',n.y);
+    rect.setAttribute('width',n.w); rect.setAttribute('height',n.h);
+    rect.setAttribute('rx',10);
+    rect.setAttribute('fill', FILL[n.layer] || '#fff');
+    rect.setAttribute('stroke', STROKE[n.layer] || '#999');
+    rect.setAttribute('stroke-width', n.layer==='core' ? 1.5 : 2);
+    if(n.layer==='core') rect.setAttribute('stroke-dasharray','6 4');
+    g.appendChild(rect);
+
+    var cx = n.x + n.w/2;
+    var ty = n.y + (n.lines && n.lines.length ? 24 : (n.h/2 + 5));
+    var t = document.createElementNS(NS,'text');
+    t.setAttribute('class','node-title');
+    t.setAttribute('x',cx); t.setAttribute('y',ty);
+    t.setAttribute('text-anchor','middle');
+    t.textContent = n.title;
+    g.appendChild(t);
+
+    (n.lines||[]).forEach(function(ln,i){
+      var lt = document.createElementNS(NS,'text');
+      lt.setAttribute('class','node-line');
+      lt.setAttribute('x',n.x+12);
+      lt.setAttribute('y',ty + 18 + i*15);
+      lt.textContent = ln;
+      g.appendChild(lt);
+    });
+
+    svg.appendChild(g);
+    n._g = g;
+  });
+
+  /* =========================================================
+   * 3) 边路由 + 箭头 marker
+   * ========================================================= */
+  var defs = document.getElementById('defs');
+  var mkMade = {};
+  function markerFor(color){
+    if(mkMade[color]) return mkMade[color];
+    var id = 'mk' + color.replace('#','');
+    var mk = document.createElementNS(NS,'marker');
+    mk.setAttribute('id',id);
+    mk.setAttribute('viewBox','0 0 10 10');
+    mk.setAttribute('refX',8); mk.setAttribute('refY',5);
+    mk.setAttribute('markerWidth',7); mk.setAttribute('markerHeight',7);
+    mk.setAttribute('orient','auto-start-reverse');
+    var p = document.createElementNS(NS,'path');
+    p.setAttribute('d','M0,0 L10,5 L0,10 z');
+    p.setAttribute('fill',color);
+    mk.appendChild(p);
+    defs.appendChild(mk);
+    mkMade[color] = 'url(#' + id + ')';
+    return mkMade[color];
+  }
+
+  function sideAnchor(id, prefer){
+    var n = nodeMap[id];
+    var cx = n.x + n.w/2, cy = n.y + n.h/2;
+    if(prefer==='top') return {x:cx, y:n.y};
+    if(prefer==='bottom') return {x:cx, y:n.y+n.h};
+    if(prefer==='right') return {x:n.x+n.w, y:cy};
+    if(prefer==='left') return {x:n.x, y:cy};
+    return {x:cx, y:n.y+n.h};
+  }
+
+  function buildPath(a, b, fromSide){
+    var k;
+    if(fromSide==='bottom' || fromSide==='top'){
+      k = Math.max(24, Math.min(60, Math.abs(b.y - a.y)/2));
+      return 'M '+a.x+' '+a.y+' C '+a.x+' '+(a.y+k)+', '+b.x+' '+(b.y-k)+', '+b.x+' '+b.y;
+    }
+    k = Math.max(20, Math.min(50, Math.abs(b.x - a.x)/2));
+    return 'M '+a.x+' '+a.y+' C '+(a.x+k)+' '+a.y+', '+(b.x-k)+' '+b.y+', '+b.x+' '+b.y;
+  }
+
+  EDGES.forEach(function(e){
+    var n1 = nodeMap[e.from], n2 = nodeMap[e.to];
+    if(!n1 || !n2){ return; }
+    // 计算锚点：目标在下 → bottom→top；同排 → right→left；arc 强制 top/bottom
+    var fromSide='bottom', toSide='top';
+    if(e.arc){
+      fromSide = e.arc==='up' ? 'top' : 'bottom';
+      toSide = fromSide;
+    } else {
+      var sameRow = Math.abs((n1.y+n1.h/2) - (n2.y+n2.h/2)) < 30;
+      if(sameRow){
+        if(n2.x > n1.x){ fromSide='right'; toSide='left'; }
+        else { fromSide='left'; toSide='right'; }
+      }
+    }
+    var a = sideAnchor(e.from, fromSide);
+    var b = sideAnchor(e.to, toSide);
+    if(e.ao){ a.x += e.ao[0]; a.y += e.ao[1]; }
+    if(e.bo){ b.x += e.bo[0]; b.y += e.bo[1]; }
+    var d;
+    if(e.arc){
+      // 拱形弧线（锚点强制 top/bottom，拱进行间空隙，避免穿过同层方块）
+      var k2 = 40;
+      var dy = e.arc==='up' ? -k2 : k2;
+      d = 'M '+a.x+' '+a.y+' C '+a.x+' '+(a.y+dy)+', '+b.x+' '+(b.y+dy)+', '+b.x+' '+b.y;
+    } else {
+      d = buildPath(a, b, fromSide);
+    }
+    var color = COLOR[e.kind] || '#888';
+
+    var g = document.createElementNS(NS,'g');
+    g.setAttribute('class','edge');
+    g.setAttribute('data-from',e.from);
+    g.setAttribute('data-to',e.to);
+
+    var path = document.createElementNS(NS,'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke', color);
+    path.setAttribute('stroke-width', 2.2);
+    path.setAttribute('stroke-linecap','round');
+    if(e.dashed) path.setAttribute('stroke-dasharray','7 5');
+    var mk = markerFor(color);
+    path.setAttribute('marker-end', mk);
+    if(e.both) path.setAttribute('marker-start', mk);
+    g.appendChild(path);
+
+    if(e.label){
+      var lab = document.createElementNS(NS,'text');
+      lab.setAttribute('class','edge-label');
+      // 标签位置取路径中点（渲染后计算），先占位
+      lab.setAttribute('x',0); lab.setAttribute('y',0);
+      lab.textContent = e.label;
+      g.appendChild(lab);
+      e._labelEl = lab;
+    }
+    svg.appendChild(g);
+    e._g = g;
+    e._pathEl = path;
+
+    var L = path.getTotalLength();
+    e._len = L;
+    if(e._labelEl){
+      var pt = path.getPointAtLength(L/2);
+      e._labelEl.setAttribute('x', pt.x);
+      e._labelEl.setAttribute('y', pt.y - 6);
+      e._labelEl.setAttribute('text-anchor','middle');
+    }
+  });
+
+  /* =========================================================
+   * 4) 光点动画：单点脉冲沿数据流自上而下流动
+   *    遇分支方块 → 分裂为多点并行；汇合方块 → 合并为一点；叶节点 → 结束
+   *    默认开启动效（1×），无控制条
+   * ========================================================= */
+  var FLOW_IDS = ['E1','E2','E3','E4','E5','E6','E7','E8','E9','E10','E11','E12','E13','E14',
+                  'E16','E17','E18','E19','E20','E21','E22','E23'];
+  var edgeMeta = {};   // id -> {path, L, color, from, to, t}
+  EDGES.forEach(function(e){
+    edgeMeta[e.id] = {path:e._pathEl, L:e._len, color:COLOR[e.kind],
+                      from:e.from, to:e.to, t:0.5 + Math.random()*0.2};
+  });
+  var inE = {}, outE = {};   // 按流程边统计入度/出度
+  FLOW_IDS.forEach(function(id){
+    var fe = edgeMeta[id];
+    (inE[fe.to] = inE[fe.to]||[]).push(fe);
+    (outE[fe.from] = outE[fe.from]||[]).push(fe);
+  });
+
+  var partLayer = document.createElementNS(NS,'g');
+  svg.appendChild(partLayer);
+
+  var tokens = [];          // 当前活动光点
+  var NODE = {};            // 节点汇合状态（按 wave 计数）
+  var waveSeq = 0, lastWave = 0, now = 0;
+  var last = null, raf = 0;
+  var WAVE_INTERVAL = 7;    // 每隔 N 秒从顶部发射一个新脉冲
+  var BREATH_PERIOD = 1.1;  // 呼吸周期（秒）
+
+  function spawnDot(color){
+    var g = document.createElementNS(NS,'g');
+    var halo = document.createElementNS(NS,'circle');
+    halo.setAttribute('r',9); halo.setAttribute('fill',color); halo.setAttribute('opacity',0.32);
+    var core = document.createElementNS(NS,'circle');
+    core.setAttribute('r',4.6); core.setAttribute('fill','#fff');
+    core.setAttribute('stroke',color); core.setAttribute('stroke-width',1.6);
+    g.appendChild(halo); g.appendChild(core);
+    partLayer.appendChild(g);
+    return {g:g, halo:halo, core:core, phase:Math.random()*Math.PI*2};
+  }
+
+  function startWave(){
+    waveSeq++;
+    lastWave = now;
+    (outE['T1']||[]).forEach(function(oe){
+      var tk = {fe:oe, d:0, wave:waveSeq, dot:spawnDot(oe.color), done:false};
+      placeDot(tk, oe, true);
+      tokens.push(tk);
+    });
+  }
+
+  function placeDot(tk, fe, isLive){
+    var off = Math.min(tk.d, 0.9999) * fe.L;
+    var pos = fe.path.getPointAtLength(off);
+    var br = 1 + 0.18 * Math.sin(2*Math.PI*now/BREATH_PERIOD + tk.dot.phase);
+    var op = isLive ? 1 : 0.14;
+    tk.dot.core.setAttribute('cx',pos.x); tk.dot.core.setAttribute('cy',pos.y);
+    tk.dot.core.setAttribute('r', 4.6*br);
+    tk.dot.core.setAttribute('opacity', op);
+    tk.dot.halo.setAttribute('cx',pos.x); tk.dot.halo.setAttribute('cy',pos.y);
+    tk.dot.halo.setAttribute('r', 9*br);
+    tk.dot.halo.setAttribute('opacity', 0.32*op);
+  }
+
+  function frame(ts){
+    var dt = last ? (ts - last)/1000 : 0.016;
+    last = ts;
+    if(dt > 0.1) dt = 0.1;   // 后台标签页回来时防止跳变
+    now += dt;
+
+    if(now - lastWave >= WAVE_INTERVAL) startWave();
+
+    // 1) 移动光点（悬停聚焦时：点亮区域继续流动，其余区域冻结）
+    var arrived = [];
+    tokens.forEach(function(tk){
+      if(tk.done) return;
+      var fe = tk.fe;
+      var isLive = !hoverId || hoverSet['e:'+fe.id];
+      if(isLive){
+        tk.d += dt / fe.t;
+        if(tk.d >= 1){ tk.done = true; arrived.push(tk); return; }
+      }
+      placeDot(tk, fe, isLive);
+    });
+
+    // 2) 清除到达方块的光点（结束或汇合）
+    tokens = tokens.filter(function(tk){
+      if(tk.done){ if(tk.dot.g.parentNode) tk.dot.g.parentNode.removeChild(tk.dot.g); return false; }
+      return true;
+    });
+
+    // 3) 节点汇合/分裂：入边全部到达 → 沿出边分裂继续（叶节点无出边 → 结束）
+    arrived.forEach(function(tk){
+      var node = tk.fe.to;
+      var st = NODE[node] || (NODE[node] = {wave:-1, count:0, fired:false});
+      if(st.wave !== tk.wave){ st.wave = tk.wave; st.count = 0; st.fired = false; }
+      st.count++;
+      if(!st.fired && st.count >= (inE[node]||[]).length){
+        st.fired = true;
+        (outE[node]||[]).forEach(function(oe){
+          var ntk = {fe:oe, d:0, wave:tk.wave, dot:spawnDot(oe.color), done:false};
+          placeDot(ntk, oe, !hoverId || hoverSet['e:'+oe.id]);
+          tokens.push(ntk);
+        });
+      }
+    });
+
+    raf = requestAnimationFrame(frame);
+  }
+
+  /* =========================================================
+   * 5) 轻交互：悬停 / 聚焦高亮相邻边；点亮区域的光点继续流动，其余冻结
+   * ========================================================= */
+  var hoverId = null, hoverSet = {};
+  function connected(id){
+    var set = {};
+    EDGES.forEach(function(e){
+      if(e.from===id || e.to===id){
+        set[e.from]=1; set[e.to]=1;
+        set['e:'+e.id]=1;
+      }
+    });
+    return set;
+  }
+  function setHover(id){
+    hoverId = id;
+    hoverSet = id ? connected(id) : {};
+    EDGES.forEach(function(e){
+      var on = !hoverId || hoverSet['e:'+e.id];
+      e._g.classList.toggle('dim', !on);
+    });
+    Object.keys(nodeMap).forEach(function(nid){
+      var n = nodeMap[nid];
+      var on = !hoverId || hoverSet[nid];
+      n._g.classList.toggle('dim', !on);
+      n._g.classList.toggle('hovered', nid===id);
+    });
+  }
+  function clearHover(){
+    hoverId = null; hoverSet = {};
+    Object.keys(nodeMap).forEach(function(nid){
+      nodeMap[nid]._g.classList.remove('dim','hovered');
+    });
+    EDGES.forEach(function(e){ e._g.classList.remove('dim'); });
+  }
+
+  Object.keys(nodeMap).forEach(function(nid){
+    var n = nodeMap[nid];
+    n._g.addEventListener('mouseenter', function(){ setHover(nid); });
+    n._g.addEventListener('mouseleave', clearHover);
+    n._g.addEventListener('focus', function(){ setHover(nid); });
+    n._g.addEventListener('blur', clearHover);
+  });
+
+  /* =========================================================
+   * 6) 启动：默认开启动效（1×），立即发射首个脉冲
+   * ========================================================= */
+  startWave();
+  raf = requestAnimationFrame(frame);
+
+  /* =========================================================
+   * 7) 左侧悬浮菜单栏：贴正文内容左缘、始终显示；滚动高亮当前区块/子标题
+   * ========================================================= */
+  var tocNav = document.querySelector('nav.toc');
+  var wrapEl = document.querySelector('.wrap');
+  function positionNav(){
+    if(!tocNav || !wrapEl) return;
+    var r = wrapEl.getBoundingClientRect();
+    var navW = tocNav.offsetWidth || 180;
+    // 始终显示：优先贴正文内容左缘；无空间时贴视口左缘悬浮
+    var left = Math.max(8, r.left - navW - 16);
+    tocNav.style.display = 'flex';
+    tocNav.style.left = left + 'px';
+  }
+  window.addEventListener('resize', positionNav);
+  positionNav();
+
+  // 滚动高亮：当前所在区块/子标题在目录中点亮
+  var navLinks = Array.prototype.slice.call(tocNav.querySelectorAll('a'));
+  var navItems = navLinks.map(function(a){
+    var id = (a.getAttribute('href')||'').slice(1);
+    var el = document.getElementById(id);
+    return el ? {id:id, link:a, el:el} : null;
+  }).filter(Boolean);
+  function spy(){
+    var line = window.scrollY + 60;
+    var cur = null;
+    navItems.forEach(function(it){
+      var top = it.el.getBoundingClientRect().top + window.scrollY;
+      if(top <= line) cur = it;
+    });
+    navLinks.forEach(function(a){ a.classList.remove('active'); });
+    if(cur){
+      cur.link.classList.add('active');
+      var group = cur.link.closest('.toc-group');
+      if(group){
+        var top = group.querySelector('a');
+        if(top && top !== cur.link) top.classList.add('active');
+      }
+    }
+  }
+  window.addEventListener('scroll', function(){ requestAnimationFrame(spy); }, {passive:true});
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

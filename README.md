@@ -138,23 +138,24 @@ ai-news-mvp/
 ```mermaid
 flowchart LR
     subgraph 采集
-        A1[GitHub 3 组查询] --> B[rule_filter 规则筛选<br/>字段完整/时间窗/关键词]
-        A2[HN topstories] --> B
-        A3[RSS 4 feed] --> B
-        A4[HF weekly top] --> B
+        A1["GitHub 3 组查询"] --> B
+        A2["HN topstories"] --> B
+        A3["RSS 4 feed"] --> B
+        A4["HF weekly top"] --> B
     end
-    B --> C[Deduper 跨源去重<br/>①URL 归一化 ②标题 SimHash≤4 ③Jaccard≥0.8]
-    C --> D[全量入库 upsert_item<br/>自然键 UNIQUE(platform,native_id)<br/>→ 指纹 canonical_key 7 天窗口归并<br/>→ item_sources 跨源映射]
-    D --> E[project_snapshots 快照<br/>+ topic_daily_stats 主题统计]
-    E --> F[trend.py 趋势引擎<br/>24h/7d/30d 五态]
-    D --> G[collect_candidates 日报候选<br/>热度分层取 top-N]
-    F --> G
-    G --> H[report.py 日报模板<br/>六栏目 + 校验]
-    G --> I[--emit-candidates<br/>candidates.json + draft.txt 占位符]
-    I --> J[Agent 渲染<br/>agent_readme.md]
-    H --> K[--report 存 daily_reports]
-    K --> L[--send 飞书发送<br/>幂等/脱敏/退避重试]
-    J --> L
+    B["rule_filter 规则筛选<br/>字段完整/时间窗/关键词"] --> C
+    C["Deduper 跨源去重<br/>①URL 归一化 ②标题 SimHash≤4 ③Jaccard≥0.8"] --> D
+    D["全量入库 upsert_item<br/>自然键 UNIQUE(platform,native_id)<br/>→ 指纹 canonical_key 7 天窗口归并<br/>→ item_sources 跨源映射"] --> E
+    D --> G
+    E["project_snapshots 快照<br/>+ topic_daily_stats 主题统计"] --> F
+    F["trend.py 趋势引擎<br/>24h/7d/30d 五态"] --> G
+    G["collect_candidates 日报候选<br/>热度分层取 top-N"] --> H
+    G --> I
+    I["--emit-candidates<br/>candidates.json + draft.txt 占位符"] --> J
+    J["Agent 渲染<br/>agent_readme.md"] --> L
+    H["report.py 日报模板<br/>六栏目 + 校验"] --> K
+    K["--report 存 daily_reports"] --> L
+    L["--send 飞书发送<br/>幂等/脱敏/退避重试"]
 ```
 
 ### 3.3 每项数据如何处理
